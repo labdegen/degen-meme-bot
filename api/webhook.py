@@ -146,14 +146,17 @@ def generate_reply(token_data: dict, query: str, tweet_text: str) -> str:
         "max_tokens": 200,
         "temperature": 0.9
     }
+    logger.info(f"Grok request: headers={headers}, body={body}")
     try:
         r = requests.post(GROK_URL, json=body, headers=headers, timeout=10)
         r.raise_for_status()
-        text = r.json()["choices"][0]["message"]["content"].strip()
+        response = r.json()
+        logger.info(f"Grok response: {response}")
+        text = response["choices"][0]["message"]["content"].strip()
         return text[:240]
     except requests.RequestException as e:
         logger.error(f"Grok API error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Grok analysis failed: {str(e)}")
+        return "Oops, my degen brain fritzed! Try again, fam."
 
 @app.post("/")
 async def handle_mention(data: dict):

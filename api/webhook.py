@@ -7,6 +7,7 @@ import os
 from dotenv import load_dotenv
 import logging
 import re
+from datetime import datetime, timedelta
 
 # Load environment variables
 load_dotenv()
@@ -38,20 +39,24 @@ GROK_API_KEY = os.getenv("GROK_API_KEY")
 HEX_REGEX = re.compile(r"^(0x[a-fA-F0-9]{40}|[A-Za-z0-9]{43,44})$")  # Ethereum or Solana addresses
 
 def fetch_token_data(query: str) -> dict:
-    """Use Grok to analyze X data for token sentiment, mentions, and momentum."""
+    """Use Grok to analyze X data for token sentiment, mentions, and momentum from the last 7 days."""
     logger.info(f"Fetching X data for query: {query}")
+    # Calculate date range (past 7 days)
+    today = datetime.utcnow()
+    start_date = (today - timedelta(days=7)).strftime("%Y-%m-%d")
+    end_date = today.strftime("%Y-%m-%d")
     system = (
-        "You’re a crypto degen analyzing X posts. Analyze recent posts (as of May 13, 2025) about the token. "
-        "Provide: tweet count, momentum (high/low based on frequency), sentiment (bullish/bearish/neutral), "
-        "and big accounts (>10,000 followers) mentioning it. Return in JSON format."
+        "You are an analytical crypto researcher. Analyze X posts from the last 7 days for the given token. "
+        "Focus on tweet volume, momentum (high/low based on post frequency), sentiment (bullish/bearish/neutral, with %), "
+        "and influential accounts (>10,000 followers, active in the last 30 days). Return JSON with precise metrics."
     )
     user_msg = (
-        f"Analyze X posts for {query} (token or address). Summarize: "
-        "1. Approx. number of tweets (e.g., dozens, hundreds). "
-        "2. Momentum (high: frequent posts; low: sparse). "
-        "3. Sentiment (bullish/bearish/neutral, with % if possible). "
-        "4. Big accounts (>10,000 followers) mentioning it (handles, follower counts). "
-        "Return JSON: {{'tweets': str, 'momentum': str, 'sentiment': str, 'big_accounts': list of {{'handle': str, 'followers': int}}}}"
+        f"Analyze X posts for {query} (token or address) from {start_date} to {end_date}. Provide: "
+        "1. Tweet count (e.g., '50-100'). "
+        "2. Momentum (high: >100 posts/day; medium: 10-100; low: <10). "
+        "3. Sentiment (bullish/bearish/neutral, with %). "
+        "4. Influential accounts (>10,000 followers, active in last 30 days, with handles and follower counts). "
+        "Return JSON: {'tweets': str, 'momentum': str, 'sentiment': str, 'big_accounts': [{'handle': str, 'followers': int}]}"
     )
     headers = {
         "Authorization": f"Bearer {GROK_API_KEY}",
@@ -95,24 +100,24 @@ def fetch_token_data(query: str) -> dict:
         return {"no_data": True}
 
 def generate_reply(token_data: dict, query: str, tweet_text: str) -> str:
-    """Call Grok for a ≤240-char reply based on token data or conversational input."""
+    """Generate a dry, analytical reply based on token data or conversational input."""
     system = (
-        "You’re a degenerate crypto gambler, snarky but useful. Keep it ≤240 chars. "
-        "For tokens, use X data (tweets, momentum, sentiment, big accounts) to mock pumps/rugs or hype. "
-        "For general text, reply conversationally or analyze sentiment."
+        "You are an expert crypto analyst. Deliver dry, data-driven responses under 240 characters. "
+        "For tokens, use X data (tweets, momentum, sentiment, accounts) to assess trends. Highlight risks or manipulation. "
+        "For general text, provide analytical insight or sentiment analysis. Avoid humor."
     )
     if not token_data.get("no_data"):
+        accounts = ", ".join([f"@{acc['handle']} ({acc['followers']:,})" for acc in token_data["big_accounts"]]) or "None"
         user_msg = (
             f"Token: {query} ({token_data['symbol']}). "
             f"Tweets: {token_data['tweets']}. Momentum: {token_data['momentum']}. "
-            f"Sentiment: {token_data['sentiment']}. "
-            f"Big accounts: {', '.join([acc['handle'] for acc in token_data['big_accounts']] or ['None'])}. "
-            "Give a punchy degen take."
+            f"Sentiment: {token_data['sentiment']}. Accounts: {accounts}. "
+            "Assess trends and risks in a concise, analytical manner."
         )
     else:
         user_msg = (
             f"Tweet: {tweet_text}. No token data found. "
-            "Reply conversationally as a crypto degen or analyze X sentiment."
+            "Provide analytical insight or analyze X sentiment for the query."
         )
     headers = {
         "Authorization": f"Bearer {GROK_API_KEY}",
@@ -125,14 +130,14 @@ def generate_reply(token_data: dict, query: str, tweet_text: str) -> str:
             {"role": "user", "content": user_msg}
         ],
         "max_tokens": 200,
-        "temperature": 0.9
+        "temperature": 0.7
     }
     logger.info(f"Grok request: headers={{'Authorization': 'Bearer [REDACTED]', 'Content-Type': 'application/json'}}, body={body}")
     try:
         r = requests.post(GROK_URL, json=body, headers=headers, timeout=10)
         if r.status_code == 400:
             logger.error(f"Grok API 400 error: {r.text}")
-            return "Yo, my circuits are fried! Try another token or vibe check."
+            return "Insufficient X data. Query a more active token or topic."
         r.raise_for_status()
         response = r.json()
         logger.info(f"Grok response: {response}")
@@ -140,7 +145,7 @@ def generate_reply(token_data: dict, query: str, tweet_text: str) -> str:
         return text[:240]
     except requests.RequestException as e:
         logger.error(f"Grok API error: {str(e)}")
-        return "Yo, my circuits are fried! Try another token or vibe check."
+        return "Insufficient X data. Query a more active token or topic."
 
 @app.post("/")
 async def handle_mention(data: dict):

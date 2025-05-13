@@ -5,18 +5,16 @@ import requests
 import os
 from dotenv import load_dotenv
 import logging
+import re
 
 # Load environment variables
 load_dotenv()
 
-# Initialize FastAPI
 app = FastAPI()
-
-# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize X API client (using @askdegen creds)
+# Initialize X API client (@askdegen creds)
 x_client = tweepy.Client(
     consumer_key=os.getenv("X_API_KEY"),
     consumer_secret=os.getenv("X_API_SECRET"),
@@ -25,50 +23,45 @@ x_client = tweepy.Client(
 )
 
 # Grok endpoint & key
-GROK_URL = "https://api.x.ai/v1/chat/completions"
+GROK_URL     = "https://api.x.ai/v1/chat/completions"
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 
-# Stubbed symbol→address map
+# Stub map for symbols
 SYMBOL_ADDRESS_MAP = {
     "DEGEN": "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
 }
 
-def fetch_token_data(symbol: str):
+HEX_REGEX = re.compile(r"^0x[a-fA-F0-9]{40}$")
+
+def fetch_token_data(address: str):
     """
-    TEST STUB: replace with your real Codex.io or CoinGecko fetch.
+    TEST STUB: Replace with your real Codex.io or CoinGecko fetch.
     """
-    address = SYMBOL_ADDRESS_MAP.get(symbol, symbol)
-    logger.info(f"Using address {address} for symbol {symbol}")
+    # If address came from a symbol, we already mapped it.
+    logger.info(f"Fetching data for address {address}")
     return {
         "address": address,
-        "name": f"{symbol} Token",
-        "symbol": symbol,
+        "name": f"Token@{address[:6]}…",
+        "symbol": None,
         "totalSupply": "1,000,000,000",
         "circulatingSupply": "750,000,000"
     }
 
-def generate_reply(token_data: dict, token_name: str, user_handle: str) -> str:
+def generate_reply(token_data: dict, query: str, user_handle: str) -> str:
     """
-    Ask Grok for a fresh, degen-style analysis that fits in 240 chars.
+    Ask Grok for a dynamic, ≤240-char degen analysis.
     """
     system = (
-        "You are a degenerate crypto gambler. Keep it concise (<=240 chars), "
-        "snarky but useful, mocking moonbois and calling out FUD. "
-        "Always include a quick take and one data point."
+        "You are a degenerate crypto gambler. Keep it ≤240 chars, "
+        "snarky but useful. Call out pumps and rugs, include one data point."
     )
     user_msg = (
-        f"User @{user_handle} mentioned ${token_name}. "
-        f"Token info: name={token_data['name']}, "
-        f"symbol={token_data['symbol']}, "
-        f"totalSupply={token_data['totalSupply']}, "
+        f"User @{user_handle} asked about {query}. "
+        f"Data: totalSupply={token_data['totalSupply']}, "
         f"circulatingSupply={token_data['circulatingSupply']}. "
-        "Give me a punchy degen analysis."
+        "Give me a punchy degen take."
     )
-
-    headers = {
-        "Authorization": f"Bearer {GROK_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
     body = {
         "model": "grok-3",
         "messages": [
@@ -81,46 +74,61 @@ def generate_reply(token_data: dict, token_name: str, user_handle: str) -> str:
 
     resp = requests.post(GROK_URL, json=body, headers=headers)
     if resp.status_code != 200:
-        logger.error(f"Grok error: {resp.text}")
-        raise HTTPException(status_code=500, detail="Failed to generate analysis")
+        logger.error("Grok error: %s", resp.text)
+        raise HTTPException(status_code=500, detail="Grok analysis failed")
     content = resp.json()["choices"][0]["message"]["content"].strip()
-    # Trim to 240 chars
     return content[:240]
 
 @app.post("/webhook")
 async def handle_mention(data: dict):
-    tweet = data.get("tweet_create_events", [{}])[0]
-    if not tweet:
-        return JSONResponse(status_code=200, content={"message": "No tweet data"})
+    event = data.get("tweet_create_events", [{}])[0]
+    if not event:
+        return JSONResponse(status_code=200, content={"message":"No tweet data"})
 
-    text     = tweet.get("text", "")
-    user     = tweet.get("user", {}).get("screen_name", "")
-    tweet_id = tweet.get("id_str", "")
+    text     = event.get("text", "")
+    user     = event.get("user", {}).get("screen_name", "")
+    tweet_id = event.get("id_str", "")
 
-    # extract first $TOKEN
-    token_name = next(
-        (w[1:].upper() for w in text.split() if w.startswith("$") and len(w) > 1),
+    # Look for $WORD
+    token_mention = next(
+        (w[1:] for w in text.split() if w.startswith("$") and len(w) > 1),
         None
     )
-    if not token_name:
-        return JSONResponse(status_code=200, content={"message": "No token mentioned"})
+    if not token_mention:
+        return JSONResponse(status_code=200, content={"message":"No token mentioned"})
+
+    # Determine if it's an address or a symbol
+    query = token_mention
+    if HEX_REGEX.match(token_mention):
+        address = token_mention
+    else:
+        address = SYMBOL_ADDRESS_MAP.get(token_mention.upper())
+        if not address:
+            # If symbol not in map, treat the SYMBOL itself as query
+            address = token_mention
 
     try:
-        token_data = fetch_token_data(token_name)
-        reply_text = generate_reply(token_data, token_name, user)
+        token_data = fetch_token_data(address)
+        # Use the original mention ($DEGEN or $0x...) as the query label
+        reply_text = generate_reply(token_data, "$" + token_mention, user)
 
-        # post as a threaded reply
-        x_client.create_tweet(
-            text=reply_text,
-            in_reply_to_tweet_id=int(tweet_id)
-        )
-        return JSONResponse(status_code=200, content={"message": "Replied to mention"})
+        # Attempt threaded reply; fallback to standalone
+        try:
+            x_client.create_tweet(
+                text=reply_text,
+                in_reply_to_tweet_id=int(tweet_id)
+            )
+        except tweepy.errors.Forbidden:
+            logger.warning("Threaded reply failed; posting standalone.")
+            x_client.create_tweet(text=reply_text)
+
+        return JSONResponse(status_code=200, content={"message":"Replied to mention"})
     except HTTPException as he:
         raise he
     except Exception as e:
-        logger.error(f"Error in handle_mention: {e}")
+        logger.error("handle_mention error: %s", e)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 @app.get("/")
 async def root():
-    return {"message": "Degen Meme Bot is live. Mention me with a $TOKEN!"}
+    return {"message":"Degen Meme Bot is live. Mention me with a $TOKEN!"}

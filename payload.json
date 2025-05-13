@@ -1,0 +1,9 @@
+{
+  "tweet_create_events":[
+    {
+      "text":"@DegenBot $PEPE",
+      "user":{"screen_name":"testuser"},
+      "id_str":"123"
+    }
+  ]
+}

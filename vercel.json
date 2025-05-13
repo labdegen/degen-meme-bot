@@ -1,16 +1,13 @@
 {
   "version": 2,
   "builds": [
-    {
-      "src": "api/**/*.py",
-      "use": "@vercel/python"
-    }
+    { "src": "api/**/*.py", "use": "@vercel/python" }
   ],
   "routes": [
-    {
-      "src": "/api/(.*)",
-      "dest": "/api/$1"
-    }
+    // 1) Keep your existing API functions
+    { "src": "/api/(.*)", "dest": "/api/$1" },
+    // 2) Rewrite root (and anything else) to your FastAPI app
+    { "src": "/(.*)",    "dest": "/api/index.py" }
   ],
   "crons": [
     {

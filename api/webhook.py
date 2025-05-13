@@ -92,14 +92,14 @@ def fetch_token_data(address: str) -> dict:
         logger.info(f"Codex.io response: {data}")
         if "errors" in data:
             logger.error(f"Codex.io API error: {data['errors']}")
-            return {"no_data": True, "message": "That token doesn’t deserve a reply"}
+            return {"no_data": True}
 
         token_data = data.get("data", {}).get("token")
         price_data = data.get("data", {}).get("getTokenPrices", [{}])[0]
 
         if not token_data:
             logger.info(f"No token data for address: {address}")
-            return {"no_data": True, "message": "That token doesn’t deserve a reply"}
+            return {"no_data": True}
 
         return {
             "address": token_data["address"],
@@ -114,23 +114,28 @@ def fetch_token_data(address: str) -> dict:
         }
     except requests.RequestException as e:
         logger.error(f"Codex.io request error for address {address}: {str(e)}")
-        return {"no_data": True, "message": "That token doesn’t deserve a reply"}
+        return {"no_data": True}
 
-def generate_reply(token_data: dict, query: str, user: str) -> str:
-    """Call Grok for a ≤240-char degen analysis with key data points."""
-    if token_data.get("no_data"):
-        return token_data["message"]
+def generate_reply(token_data: dict, query: str, tweet_text: str) -> str:
+    """Call Grok for a ≤240-char reply, using token data or sentiment analysis."""
     system = (
-        "You’re a degenerate crypto gambler. Keep it ≤240 chars, snarky but useful, "
-        "mock pumps/rugs, use price, supply, and scam flag for insights."
+        "You’re a degenerate crypto gambler, snarky but useful. Keep it ≤240 chars. "
+        "For tokens, mock pumps/rugs, use price, supply, scam flag. "
+        "For general text, analyze sentiment or reply conversationally."
     )
-    scam_note = " (SCAM ALERT!)" if token_data["isScam"] else ""
-    user_msg = (
-        f"Token: {query} ({token_data['symbol']}{scam_note}). "
-        f"Price: ${token_data['priceUsd']} (Conf: {token_data['confidence']}). "
-        f"Supply: {token_data['totalSupply']}, Circ: {token_data['circulatingSupply']}. "
-        "Give a punchy degen take."
-    )
+    if not token_data.get("no_data"):
+        scam_note = " (SCAM ALERT!)" if token_data["isScam"] else ""
+        user_msg = (
+            f"Token: {query} ({token_data['symbol']}{scam_note}). "
+            f"Price: ${token_data['priceUsd']} (Conf: {token_data['confidence']}). "
+            f"Supply: {token_data['totalSupply']}, Circ: {token_data['circulatingSupply']}. "
+            "Give a punchy degen take."
+        )
+    else:
+        user_msg = (
+            f"Tweet: {tweet_text}. No token data found. "
+            "Analyze sentiment on X or reply conversationally as a crypto degen."
+        )
     headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
     body = {
         "model": "grok-3",
@@ -152,7 +157,8 @@ def generate_reply(token_data: dict, query: str, user: str) -> str:
 
 @app.post("/")
 async def handle_mention(data: dict):
-    """Handle Twitter webhook for @askdegen mentions with $TOKEN or contract address."""
+    """Handle Twitter webhook for @askdegen mentions."""
+    logger.info(f"Received payload: {data}")
     if "tweet_create_events" not in data or not data["tweet_create_events"]:
         logger.error(f"Invalid webhook payload: {data}")
         return JSONResponse({"message": "No tweet data"}, status_code=400)
@@ -177,36 +183,39 @@ async def handle_mention(data: dict):
             tok = w
             break
 
-    if not tok:
-        logger.info(f"No token or address in tweet: {txt}")
-        return JSONResponse({"message": "No token or address mentioned"}, status_code=200)
-
-    # Determine address and query
-    if HEX_REGEX.match(tok):
-        addr = tok
-        query = tok
-    else:
-        addr = SYMBOL_ADDRESS_MAP.get(tok.upper())
-        query = "$" + tok.upper()
-        if not addr:
-            logger.error(f"No address mapped for token: {tok}")
-            return JSONResponse({"message": f"No address found for ${tok}"}, status_code=400)
-
     try:
-        token_data = fetch_token_data(addr)
-        reply_content = generate_reply(token_data, query, user)
-        reply = f"@{user} {reply_content}"
-        max_reply_length = 280 - len(f"@{user} ") - 1
+        if tok:
+            # Token or address mentioned
+            if HEX_REGEX.match(tok):
+                addr = tok
+                query = tok
+            else:
+                addr = SYMBOL_ADDRESS_MAP.get(tok.upper())
+                query = "$" + tok.upper()
+                if not addr:
+                    # Treat unmapped token as general text
+                    token_data = {"no_data": True}
+                    reply_content = generate_reply(token_data, query, txt)
+            if addr:
+                token_data = fetch_token_data(addr)
+                reply_content = generate_reply(token_data, query, txt)
+        else:
+            # No token/address, conversational reply
+            token_data = {"no_data": True}
+            reply_content = generate_reply(token_data, "", txt)
+
+        reply = reply_content  # No @user tag
+        max_reply_length = 280 - 1
         reply = reply[:max_reply_length]
 
         try:
             x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(tid))
-            logger.info(f"Replied to @{user} with: {reply}")
+            logger.info(f"Replied to tweet {tid} with: {reply}")
         except tweepy.errors.Forbidden as e:
-            logger.warning(f"Threaded reply failed for @{user}: {str(e)}; posting standalone")
+            logger.warning(f"Threaded reply failed for tweet {tid}: {str(e)}; posting standalone")
             x_client.create_tweet(text=reply)
         except tweepy.TweepyException as e:
-            logger.error(f"Failed to post reply to @{user}: {str(e)}")
+            logger.error(f"Failed to post reply to tweet {tid}: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Failed to post reply: {str(e)}")
 
         return JSONResponse({"message": "Replied to mention"}, status_code=200)

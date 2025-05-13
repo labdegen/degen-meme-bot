@@ -16,7 +16,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Validate environment variables
-required_env_vars = ["X_API_KEY", "X_API_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET", "GROK_API_KEY", "CODEX_API_KEY"]
+required_env_vars = ["X_API_KEY", "X_API_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET", "GROK_API_KEY"]
 for var in required_env_vars:
     if not os.getenv(var):
         logger.error(f"Missing environment variable: {var}")
@@ -34,107 +34,85 @@ x_client = tweepy.Client(
 GROK_URL = "https://api.x.ai/v1/chat/completions"
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 
-# Codex.io config
-CODEX_API_URL = "https://graph.codex.io/graphql"
-CODEX_API_KEY = os.getenv("CODEX_API_KEY")
-
-# Simple symbol→address map
-SYMBOL_ADDRESS_MAP = {"DEGEN": "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"}
+# Token regex for $TOKEN or contract address
 HEX_REGEX = re.compile(r"^(0x[a-fA-F0-9]{40}|[A-Za-z0-9]{43,44})$")  # Ethereum or Solana addresses
 
-def fetch_token_data(address: str) -> dict:
-    """Fetch token metadata and price from Codex.io GraphQL API."""
-    logger.info(f"Fetching data for address: {address}")
-    network_id = 101 if len(address) > 40 else 1  # Solana or Ethereum
-    query = """
-    query GetTokenData($input: TokenInput!, $priceInput: [GetPriceInput!]!) {
-        token(input: $input) {
-            address
-            name
-            symbol
-            totalSupply
-            decimals
-            isScam
-            info {
-                circulatingSupply
-            }
-        }
-        getTokenPrices(inputs: $priceInput) {
-            address
-            priceUsd
-            confidence
-        }
-    }
-    """
-    body = {
-        "query": query,
-        "variables": {
-            "input": {
-                "address": address,
-                "networkId": network_id
-            },
-            "priceInput": [
-                {
-                    "address": address,
-                    "networkId": network_id
-                }
-            ]
-        }
-    }
+def fetch_token_data(query: str) -> dict:
+    """Use Grok to analyze X data for token sentiment, mentions, and momentum."""
+    logger.info(f"Fetching X data for query: {query}")
+    system = (
+        "You’re a crypto degen analyzing X posts. Analyze recent posts (as of May 13, 2025) about the token. "
+        "Provide: tweet count, momentum (high/low based on frequency), sentiment (bullish/bearish/neutral), "
+        "and big accounts (>10,000 followers) mentioning it. Return in JSON format."
+    )
+    user_msg = (
+        f"Analyze X posts for {query} (token or address). Summarize: "
+        "1. Approx. number of tweets (e.g., dozens, hundreds). "
+        "2. Momentum (high: frequent posts; low: sparse). "
+        "3. Sentiment (bullish/bearish/neutral, with % if possible). "
+        "4. Big accounts (>10,000 followers) mentioning it (handles, follower counts). "
+        "Return JSON: {{'tweets': str, 'momentum': str, 'sentiment': str, 'big_accounts': list of {{'handle': str, 'followers': int}}}}"
+    )
     headers = {
-        "Authorization": f"Bearer {CODEX_API_KEY}",
+        "Authorization": f"Bearer {GROK_API_KEY}",
         "Content-Type": "application/json"
     }
+    body = {
+        "model": "grok-3",
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg}
+        ],
+        "max_tokens": 300,
+        "temperature": 0.7
+    }
+    logger.info(f"Grok request: headers={{'Authorization': 'Bearer [REDACTED]', 'Content-Type': 'application/json'}}, body={body}")
     try:
-        response = requests.post(CODEX_API_URL, json=body, headers=headers, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        logger.info(f"Codex.io response: {data}")
-        if "errors" in data:
-            logger.error(f"Codex.io API error: {data['errors']}")
+        r = requests.post(GROK_URL, json=body, headers=headers, timeout=10)
+        if r.status_code == 400:
+            logger.error(f"Grok API 400 error: {r.text}")
             return {"no_data": True}
-
-        token_data = data.get("data", {}).get("token")
-        price_data = data.get("data", {}).get("getTokenPrices", [{}])[0]
-
-        if not token_data:
-            logger.info(f"No token data for address: {address}")
+        r.raise_for_status()
+        response = r.json()
+        logger.info(f"Grok response: {response}")
+        text = response["choices"][0]["message"]["content"].strip()
+        import json
+        try:
+            data = json.loads(text)
+            return {
+                "no_data": False,
+                "tweets": data.get("tweets", "Unknown"),
+                "momentum": data.get("momentum", "Unknown"),
+                "sentiment": data.get("sentiment", "Unknown"),
+                "big_accounts": data.get("big_accounts", []),
+                "symbol": query.replace("$", "").upper()
+            }
+        except json.JSONDecodeError:
+            logger.error(f"Failed to parse Grok response as JSON: {text}")
             return {"no_data": True}
-
-        return {
-            "address": token_data["address"],
-            "name": token_data.get("name", "Unknown"),
-            "symbol": token_data.get("symbol", "Unknown"),
-            "totalSupply": str(token_data.get("totalSupply", "0")),
-            "circulatingSupply": str(token_data["info"].get("circulatingSupply", "0") if token_data.get("info") else "0"),
-            "decimals": token_data.get("decimals", 0),
-            "isScam": token_data.get("isScam", False),
-            "priceUsd": str(price_data.get("priceUsd", "0")),
-            "confidence": str(price_data.get("confidence", "0"))
-        }
     except requests.RequestException as e:
-        logger.error(f"Codex.io request error for address {address}: {str(e)}")
+        logger.error(f"Grok API error: {str(e)}")
         return {"no_data": True}
 
 def generate_reply(token_data: dict, query: str, tweet_text: str) -> str:
-    """Call Grok for a ≤240-char reply, using token data or sentiment analysis."""
+    """Call Grok for a ≤240-char reply based on token data or conversational input."""
     system = (
         "You’re a degenerate crypto gambler, snarky but useful. Keep it ≤240 chars. "
-        "For tokens, mock pumps/rugs, use price, supply, scam flag. "
-        "For general text, analyze sentiment or reply conversationally."
+        "For tokens, use X data (tweets, momentum, sentiment, big accounts) to mock pumps/rugs or hype. "
+        "For general text, reply conversationally or analyze sentiment."
     )
     if not token_data.get("no_data"):
-        scam_note = " (SCAM ALERT!)" if token_data["isScam"] else ""
         user_msg = (
-            f"Token: {query} ({token_data['symbol']}{scam_note}). "
-            f"Price: ${token_data['priceUsd']} (Conf: {token_data['confidence']}). "
-            f"Supply: {token_data['totalSupply']}, Circ: {token_data['circulatingSupply']}. "
+            f"Token: {query} ({token_data['symbol']}). "
+            f"Tweets: {token_data['tweets']}. Momentum: {token_data['momentum']}. "
+            f"Sentiment: {token_data['sentiment']}. "
+            f"Big accounts: {', '.join([acc['handle'] for acc in token_data['big_accounts']] or ['None'])}. "
             "Give a punchy degen take."
         )
     else:
         user_msg = (
             f"Tweet: {tweet_text}. No token data found. "
-            "Analyze sentiment on X or reply conversationally as a crypto degen."
+            "Reply conversationally as a crypto degen or analyze X sentiment."
         )
     headers = {
         "Authorization": f"Bearer {GROK_API_KEY}",
@@ -199,18 +177,8 @@ async def handle_mention(data: dict):
 
         try:
             if tok:
-                if HEX_REGEX.match(tok):
-                    addr = tok
-                    query = tok
-                else:
-                    addr = SYMBOL_ADDRESS_MAP.get(tok.upper())
-                    query = "$" + tok.upper()
-                    if not addr:
-                        token_data = {"no_data": True}
-                        reply_content = generate_reply(token_data, query, txt)
-                if addr:
-                    token_data = fetch_token_data(addr)
-                    reply_content = generate_reply(token_data, query, txt)
+                token_data = fetch_token_data(tok)
+                reply_content = generate_reply(token_data, tok, txt)
             else:
                 token_data = {"no_data": True}
                 reply_content = generate_reply(token_data, "", txt)
@@ -237,19 +205,8 @@ async def handle_mention(data: dict):
     try:
         if tok:
             # Token or address mentioned
-            if HEX_REGEX.match(tok):
-                addr = tok
-                query = tok
-            else:
-                addr = SYMBOL_ADDRESS_MAP.get(tok.upper())
-                query = "$" + tok.upper()
-                if not addr:
-                    # Treat unmapped token as general text
-                    token_data = {"no_data": True}
-                    reply_content = generate_reply(token_data, query, txt)
-            if addr:
-                token_data = fetch_token_data(addr)
-                reply_content = generate_reply(token_data, query, txt)
+            token_data = fetch_token_data(tok)
+            reply_content = generate_reply(token_data, tok, txt)
         else:
             # No token/address, conversational reply
             token_data = {"no_data": True}

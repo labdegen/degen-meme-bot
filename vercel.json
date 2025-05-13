@@ -8,8 +8,12 @@
   ],
   "routes": [
     {
+      "src": "/api/scheduled",
+      "dest": "/api/scheduled.py"
+    },
+    {
       "src": "/api/(.*)",
-      "dest": "/api/$1.py"
+      "dest": "/api/index.py"
     },
     {
       "src": "/(.*)",

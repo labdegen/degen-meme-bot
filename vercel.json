@@ -8,6 +8,11 @@
   ],
   "routes": [
     {
+      "src": "/",
+      "methods": ["POST"],
+      "dest": "api/webhook.py"
+    },
+    {
       "src": "/api/scheduled",
       "dest": "api/scheduled.py"
     },
@@ -23,7 +28,7 @@
   "crons": [
     {
       "path": "/api/scheduled",
-      "schedule": "0 9 * * *"
+      "schedule": "0 */4 * * *"
     }
   ]
 }

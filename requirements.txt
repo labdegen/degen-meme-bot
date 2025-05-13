@@ -1,7 +1,5 @@
 fastapi==0.115.0
 tweepy==4.14.0
-xai-sdk==0.1.2
 requests==2.32.3
 python-dotenv==1.0.1
 uvicorn==0.30.6
-standard-imghdr==3.13.0

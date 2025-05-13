@@ -109,40 +109,63 @@ def generate_reply(token_data: dict, query: str, user: str) -> str:
         "max_tokens": 200,
         "temperature": 0.9
     }
-
-    r = requests.post(GROK_URL, json=body, headers=headers)
-    if r.status_code != 200:
-        logger.error("Grok failed: %s", r.text)
-        raise HTTPException(status_code=500, detail="Grok analysis failed")
-    text = r.json()["choices"][0]["message"]["content"].strip()
-    return text[:240]
+    try:
+        r = requests.post(GROK_URL, json=body, headers=headers, timeout=10)
+        r.raise_for_status()
+        text = r.json()["choices"][0]["message"]["content"].strip()
+        return text[:240]
+    except requests.RequestException as e:
+        logger.error(f"Grok API error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Grok analysis failed: {str(e)}")
 
 @app.post("/")
 async def handle_mention(data: dict):
-    evt = data.get("tweet_create_events", [{}])[0]
-    if not evt:
-        return JSONResponse({"message": "No tweet data"}, status_code=200)
+    """Handle Twitter webhook for @askdegen mentions with $TOKEN or contract address."""
+    if "tweet_create_events" not in data or not data["tweet_create_events"]:
+        logger.error(f"Invalid webhook payload: {data}")
+        return JSONResponse({"message": "No tweet data"}, status_code=400)
 
+    evt = data["tweet_create_events"][0]
     txt = evt.get("text", "")
     user = evt.get("user", {}).get("screen_name", "")
     tid = evt.get("id_str", "")
-    tok = next((w[1:] for w in txt.split() if w.startswith("$") and len(w) > 1), None)
-    if not tok:
-        return JSONResponse({"message": "No token mentioned"}, status_code=200)
 
+    if not all([txt, user, tid]):
+        logger.error(f"Missing tweet data: text={txt}, user={user}, tid={tid}")
+        return JSONResponse({"message": "Invalid tweet data"}, status_code=400)
+
+    # Check for $TOKEN or contract address
+    words = txt.split()
+    tok = None
+    for w in words:
+        if w.startswith("$") and len(w) > 1:
+            tok = w[1:]
+            break
+        if HEX_REGEX.match(w):
+            tok = w
+            break
+
+    if not tok:
+        logger.info(f"No token or address in tweet: {txt}")
+        return JSONResponse({"message": "No token or address mentioned"}, status_code=200)
+
+    # Determine address and query
     if HEX_REGEX.match(tok):
         addr = tok
         query = tok
     else:
-        addr = SYMBOL_ADDRESS_MAP.get(tok.upper(), tok)
+        addr = SYMBOL_ADDRESS_MAP.get(tok.upper())
         query = "$" + tok.upper()
+        if not addr:
+            logger.error(f"No address mapped for token: {tok}")
+            return JSONResponse({"message": f"No address found for ${tok}"}, status_code=400)
 
     try:
         token_data = fetch_token_data(addr)
         reply_content = generate_reply(token_data, query, user)
         reply = f"@{user} {reply_content}"
         max_reply_length = 280 - len(f"@{user} ") - 1
-        reply = reply[:280]
+        reply = reply[:max_reply_length]
 
         try:
             x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(tid))
@@ -158,5 +181,5 @@ async def handle_mention(data: dict):
     except HTTPException as he:
         raise he
     except Exception as e:
-        logger.error("handle_mention error: %s", e)
+        logger.error(f"handle_mention error: {str(e)}")
         return JSONResponse({"error": str(e)}, status_code=500)

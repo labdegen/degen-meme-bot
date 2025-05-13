@@ -136,7 +136,10 @@ def generate_reply(token_data: dict, query: str, tweet_text: str) -> str:
             f"Tweet: {tweet_text}. No token data found. "
             "Analyze sentiment on X or reply conversationally as a crypto degen."
         )
-    headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {GROK_API_KEY}",
+        "Content-Type": "application/json"
+    }
     body = {
         "model": "grok-3",
         "messages": [
@@ -146,9 +149,12 @@ def generate_reply(token_data: dict, query: str, tweet_text: str) -> str:
         "max_tokens": 200,
         "temperature": 0.9
     }
-    logger.info(f"Grok request: headers={headers}, body={body}")
+    logger.info(f"Grok request: headers={{'Authorization': 'Bearer [REDACTED]', 'Content-Type': 'application/json'}}, body={body}")
     try:
         r = requests.post(GROK_URL, json=body, headers=headers, timeout=10)
+        if r.status_code == 400:
+            logger.error(f"Grok API 400 error: {r.text}")
+            return "Yo, my circuits are fried! Try another token or vibe check."
         r.raise_for_status()
         response = r.json()
         logger.info(f"Grok response: {response}")
@@ -156,7 +162,7 @@ def generate_reply(token_data: dict, query: str, tweet_text: str) -> str:
         return text[:240]
     except requests.RequestException as e:
         logger.error(f"Grok API error: {str(e)}")
-        return "Oops, my degen brain fritzed! Try again, fam."
+        return "Yo, my circuits are fried! Try another token or vibe check."
 
 @app.post("/")
 async def handle_mention(data: dict):
@@ -174,6 +180,48 @@ async def handle_mention(data: dict):
     if not all([txt, user, tid]):
         logger.error(f"Missing tweet data: text={txt}, user={user}, tid={tid}")
         return JSONResponse({"message": "Invalid tweet data"}, status_code=400)
+
+    logger.info(f"Processing tweet ID: {tid}, user: {user}, text: {txt}")
+
+    # Validate tid early
+    if not tid.isdigit() or len(tid) < 15:
+        logger.error(f"Invalid tweet ID: {tid}")
+        # Generate reply anyway for standalone post
+        words = txt.split()
+        tok = None
+        for w in words:
+            if w.startswith("$") and len(w) > 1:
+                tok = w[1:]
+                break
+            if HEX_REGEX.match(w):
+                tok = w
+                break
+
+        try:
+            if tok:
+                if HEX_REGEX.match(tok):
+                    addr = tok
+                    query = tok
+                else:
+                    addr = SYMBOL_ADDRESS_MAP.get(tok.upper())
+                    query = "$" + tok.upper()
+                    if not addr:
+                        token_data = {"no_data": True}
+                        reply_content = generate_reply(token_data, query, txt)
+                if addr:
+                    token_data = fetch_token_data(addr)
+                    reply_content = generate_reply(token_data, query, txt)
+            else:
+                token_data = {"no_data": True}
+                reply_content = generate_reply(token_data, "", txt)
+
+            reply = f"Re: {txt[:50]}... {reply_content}"[:280]
+            tweet_response = x_client.create_tweet(text=reply)
+            logger.info(f"Standalone reply posted due to invalid tid: {reply}, response: {tweet_response}")
+            return JSONResponse({"message": "Replied to mention (standalone)"}, status_code=200)
+        except tweepy.TweepyException as e:
+            logger.error(f"Failed to post standalone reply: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Failed to post reply: {str(e)}")
 
     # Check for $TOKEN or contract address
     words = txt.split()
@@ -212,11 +260,13 @@ async def handle_mention(data: dict):
         reply = reply[:max_reply_length]
 
         try:
-            x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(tid))
-            logger.info(f"Replied to tweet {tid} with: {reply}")
+            tweet_response = x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(tid))
+            logger.info(f"Replied to tweet {tid} with: {reply}, response: {tweet_response}")
         except tweepy.errors.Forbidden as e:
             logger.warning(f"Threaded reply failed for tweet {tid}: {str(e)}; posting standalone")
-            x_client.create_tweet(text=reply)
+            reply = f"Re: {txt[:50]}... {reply}"[:280]
+            tweet_response = x_client.create_tweet(text=reply)
+            logger.info(f"Standalone reply posted: {reply}, response: {tweet_response}")
         except tweepy.TweepyException as e:
             logger.error(f"Failed to post reply to tweet {tid}: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Failed to post reply: {str(e)}")

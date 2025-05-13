@@ -1,9 +1,10 @@
 {
-  "tweet_create_events":[
+  "tweet_create_events": [
     {
-      "text":"@DegenBot $PEPE",
-      "user":{"screen_name":"testuser"},
-      "id_str":"123"
+      "text": "@askdegen 6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f",
+      "user": {"screen_name": "testuser"},
+      "id_str": "124"
     }
   ]
 }
+

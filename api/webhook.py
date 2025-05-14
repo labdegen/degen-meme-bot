@@ -241,24 +241,24 @@ def generate_reply(token_data: dict, query: str, tweet_text: str, tid: str, is_c
         prior_context = {"query": "", "response": ""}
 
     system = (
-        "You are a cynical crypto trader. Respond in a dry, conversational tone under 280 characters. "
-        "React naturally like a seasoned trader, don’t repeat or summarize the query. For tokens, use DexScreener and X data to call out price, liquidity, volume, trends, risks, and big accounts (no specific handles). "
-        "For general text, stay sharp and analytical. Use prior context to stay on-topic. Avoid contract addresses in replies."
+        "You are a cynical crypto trader. Respond in a dry, conversational tone under 200 chars. "
+        "Use DexScreener (price, liquidity, volume) and X data (tweets, sentiment, big accounts) to call out trends, risks. "
+        "No account handles, no contract addresses. Use context, stay sharp."
     )
     if not token_data.get("no_data"):
         user_msg = (
             f"Token: {query} ({token_data['symbol']}). "
-            f"DexScreener: Price ${dexscreener_data.get('price_usd', 0):.4f}, Liquidity ${dexscreener_data.get('liquidity_usd', 0):.0f}, Volume ${dexscreener_data.get('volume_usd', 0):.0f}, Txns {dexscreener_data.get('transaction_count', 0)}. "
-            f"X: Tweets {token_data['tweets']}, Momentum {token_data['momentum']}, Sentiment {token_data['sentiment']}, Big accounts {token_data['big_accounts_count']}. "
+            f"DexScreener: Price ${dexscreener_data.get('price_usd', 0):.4f}, Liquidity ${dexscreener_data.get('liquidity_usd', 0):.0f}, Volume ${dexscreener_data.get('volume_usd', 0):.0f}. "
+            f"X: Tweets {token_data['tweets']}, Sentiment {token_data['sentiment']}, Big accounts {token_data['big_accounts_count']}. "
             f"Prior: Query: {prior_context['query']}, Response: {prior_context['response']}. "
-            "Give a concise, actionable take like a trader, max 280 chars."
+            "Give a concise, actionable take, max 200 chars."
         )
     else:
         user_msg = (
             f"Query: {tweet_text}. No token data found. "
             f"DexScreener: {json.dumps(dexscreener_data)}. "
             f"Prior: Query: {prior_context['query']}, Response: {prior_context['response']}. "
-            "Engage conversationally with a sharp, analytical edge, max 280 chars."
+            "Engage with a sharp edge, max 200 chars."
         )
     headers = {
         "Authorization": f"Bearer {GROK_API_KEY}",
@@ -270,7 +270,7 @@ def generate_reply(token_data: dict, query: str, tweet_text: str, tid: str, is_c
             {"role": "system", "content": system},
             {"role": "user", "content": user_msg}
         ],
-        "max_tokens": 280,
+        "max_tokens": 200,
         "temperature": 0.7
     }
     logger.info(f"Grok request: headers={{'Authorization': 'Bearer [REDACTED]', 'Content-Type': 'application/json'}}, body={body}")
@@ -278,7 +278,7 @@ def generate_reply(token_data: dict, query: str, tweet_text: str, tid: str, is_c
         r = requests.post(GROK_URL, json=body, headers=headers, timeout=15)
         if r.status_code == 400:
             logger.error(f"Grok API 400 error: {r.text}")
-            return "No real buzz on X for this. Try a token with more noise."
+            return "No buzz on X. Try a token with juice."
         r.raise_for_status()
         response = r.json()
         logger.info(f"Grok response: {response}")
@@ -290,10 +290,10 @@ def generate_reply(token_data: dict, query: str, tweet_text: str, tid: str, is_c
         except redis.RedisError as e:
             logger.error(f"Redis set failed: {str(e)}")
 
-        return text[:280]
+        return text[:200]
     except requests.RequestException as e:
         logger.error(f"Grok API error: {str(e)}")
-        return "No real buzz on X for this. Try a token with more noise."
+        return "No buzz on X. Try a token with juice."
 
 @app.post("/")
 async def handle_mention(data: dict):
@@ -350,4 +350,52 @@ async def handle_mention(data: dict):
                 return JSONResponse({"message": "Replied to mention (standalone)"}, status_code=200)
             except tweepy.TweepyException as e:
                 logger.error(f"Failed to post standalone reply: {str(e)}")
-                raise HTTPException(status_code=-DexScreener data, X sentiment, and context-aware replies.
+                raise HTTPException(status_code=500, detail=f"Failed to post reply: {str(e)}")
+
+        # Check for $TOKEN, contract address, or hyped token query
+        words = txt.split()
+        tok = None
+        for w in words:
+            if w.startswith("$") and len(w) > 1:
+                tok = w[1:]
+                break
+            if HEX_REGEX.match(w):
+                tok = w
+                break
+            if "most hyped token" in w.lower():
+                tok = w
+                break
+
+        try:
+            if tok:
+                resolved_token, is_contract_address, dexscreener_data = resolve_token(tok)
+                token_data = fetch_token_data(resolved_token, tid, dexscreener_data)
+                reply_content = generate_reply(token_data, resolved_token, txt, tid, is_contract_address, dexscreener_data)
+            else:
+                token_data = {"no_data": True}
+                reply_content = generate_reply(token_data, "", txt, tid, False, {})
+
+            reply = reply_content
+            max_reply_length = 200
+            reply = reply[:max_reply_length]
+
+            try:
+                tweet_response = x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(reply_tid))
+                logger.info(f"Replied to tweet {reply_tid} with: {reply}, response: {tweet_response}")
+            except tweepy.errors.Forbidden as e:
+                logger.warning(f"Threaded reply failed for tweet {reply_tid}: {str(e)}; posting standalone")
+                tweet_response = x_client.create_tweet(text=reply)
+                logger.info(f"Standalone reply posted: {reply}, response: {tweet_response}")
+            except tweepy.TweepyException as e:
+                logger.error(f"Failed to post reply to tweet {reply_tid}: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Failed to post reply: {str(e)}")
+
+            return JSONResponse({"message": "Replied to mention"}, status_code=200)
+        except HTTPException as he:
+            raise he
+        except Exception as e:
+            logger.error(f"handle_mention error: {str(e)}")
+            return JSONResponse({"error": str(e)}, status_code=500)
+    except Exception as e:
+        logger.error(f"Top-level error in handle_mention: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")

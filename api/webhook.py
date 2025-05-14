@@ -7,6 +7,8 @@ import os
 from dotenv import load_dotenv
 import logging
 import re
+import redis
+import json
 from datetime import datetime, timedelta
 
 # Load environment variables
@@ -17,43 +19,71 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Validate environment variables
-required_env_vars = ["X_API_KEY", "X_API_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET", "GROK_API_KEY"]
+required_env_vars = ["X_API_KEY", "X_API_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET", "GROK_API_KEY", "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"]
 for var in required_env_vars:
     if not os.getenv(var):
         logger.error(f"Missing environment variable: {var}")
         raise RuntimeError(f"Missing environment variable: {var}")
 
 # Tweepy client (@askdegen creds)
-x_client = tweepy.Client(
-    consumer_key=os.getenv("X_API_KEY"),
-    consumer_secret=os.getenv("X_API_SECRET"),
-    access_token=os.getenv("X_ACCESS_TOKEN"),
-    access_token_secret=os.getenv("X_ACCESS_TOKEN_SECRET")
-)
+try:
+    x_client = tweepy.Client(
+        consumer_key=os.getenv("X_API_KEY"),
+        consumer_secret=os.getenv("X_API_SECRET"),
+        access_token=os.getenv("X_ACCESS_TOKEN"),
+        access_token_secret=os.getenv("X_ACCESS_TOKEN_SECRET")
+    )
+    user = x_client.get_me()
+    logger.info(f"X API authenticated as: {user.data.username}")
+except tweepy.TweepyException as e:
+    logger.error(f"X API authentication failed: {str(e)}")
+    raise RuntimeError(f"X API authentication failed: {str(e)}")
+
+# Redis client
+try:
+    redis_client = redis.Redis(
+        host=os.getenv("REDIS_HOST"),
+        port=int(os.getenv("REDIS_PORT")),
+        password=os.getenv("REDIS_PASSWORD"),
+        decode_responses=True
+    )
+    redis_client.ping()
+    logger.info("Redis connection successful")
+except redis.RedisError as e:
+    logger.error(f"Redis connection failed: {str(e)}")
+    raise RuntimeError(f"Redis connection failed: {str(e)}")
 
 # Grok config
 GROK_URL = "https://api.x.ai/v1/chat/completions"
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 
 # Token regex for $TOKEN or contract address
-HEX_REGEX = re.compile(r"^(0x[a-fA-F0-9]{40}|[A-Za-z0-9]{43,44})$")  # Ethereum or Solana addresses
+HEX_REGEX = re.compile(r"^(0x[a-fA-F0-9]{40}|[A-Za-z0-9]{43,44})$")
 
-def fetch_token_data(query: str) -> dict:
+def fetch_token_data(query: str, tid: str) -> dict:
     """Use Grok to analyze X data for token sentiment, mentions, and momentum from the last 7 days."""
-    logger.info(f"Fetching X data for query: {query}")
+    logger.info(f"Fetching X data for query: {query}, tid: {tid}")
+    # Check Redis for prior context
+    context_key = f"conversation:{tid}"
+    context = redis_client.get(context_key)
+    prior_context = json.loads(context) if context else {"query": "", "response": ""}
+
     # Calculate date range (past 7 days)
     today = datetime.utcnow()
     start_date = (today - timedelta(days=7)).strftime("%Y-%m-%d")
     end_date = today.strftime("%Y-%m-%d")
     system = (
-        "You are an analytical crypto researcher. Analyze X posts from the last 7 days for the given token. "
-        "Focus on tweet volume, momentum (high/low based on post frequency), sentiment (bullish/bearish/neutral, with %), "
-        "and influential accounts (>10,000 followers, active in the last 30 days). Return JSON with precise metrics."
+        "You are a cynical crypto analyst. Analyze X posts from the last 7 days for the given token. "
+        "Focus on tweet volume, momentum (high: >100 posts/day; medium: 10-100; low: <10), sentiment (bullish/bearish/neutral, with %), "
+        "and influential accounts (>10,000 followers, active in last 30 days). Return JSON with concise metrics. "
+        "Only include verified, active accounts to avoid outdated or fabricated data."
     )
     user_msg = (
-        f"Analyze X posts for {query} (token or address) from {start_date} to {end_date}. Provide: "
+        f"Analyze X posts for {query} (token or address) from {start_date} to {end_date}. "
+        f"Prior context: Query: {prior_context['query']}, Response: {prior_context['response']}. "
+        "Provide: "
         "1. Tweet count (e.g., '50-100'). "
-        "2. Momentum (high: >100 posts/day; medium: 10-100; low: <10). "
+        "2. Momentum (high/medium/low). "
         "3. Sentiment (bullish/bearish/neutral, with %). "
         "4. Influential accounts (>10,000 followers, active in last 30 days, with handles and follower counts). "
         "Return JSON: {'tweets': str, 'momentum': str, 'sentiment': str, 'big_accounts': [{'handle': str, 'followers': int}]}"
@@ -81,7 +111,6 @@ def fetch_token_data(query: str) -> dict:
         response = r.json()
         logger.info(f"Grok response: {response}")
         text = response["choices"][0]["message"]["content"].strip()
-        import json
         try:
             data = json.loads(text)
             return {
@@ -99,25 +128,33 @@ def fetch_token_data(query: str) -> dict:
         logger.error(f"Grok API error: {str(e)}")
         return {"no_data": True}
 
-def generate_reply(token_data: dict, query: str, tweet_text: str) -> str:
-    """Generate a dry, analytical reply based on token data or conversational input."""
+def generate_reply(token_data: dict, query: str, tweet_text: str, tid: str) -> str:
+    """Generate a natural, conversational reply with context retention."""
+    logger.info(f"Generating reply for query: {query}, tid: {tid}")
+    # Check Redis for prior context
+    context_key = f"conversation:{tid}"
+    context = redis_client.get(context_key)
+    prior_context = json.loads(context) if context else {"query": "", "response": ""}
+
     system = (
-        "You are an expert crypto analyst. Deliver dry, data-driven responses under 240 characters. "
-        "For tokens, use X data (tweets, momentum, sentiment, accounts) to assess trends. Highlight risks or manipulation. "
-        "For general text, provide analytical insight or sentiment analysis. Avoid humor."
+        "You are a cynical crypto trader. Respond in a dry, conversational tone under 280 characters. "
+        "React naturally to the query like a seasoned trader, don’t repeat or summarize it. For tokens, use X data to call out trends, risks, and key accounts. "
+        "For general text, stay sharp and analytical. Use prior context to stay on-topic, cite only verified accounts."
     )
     if not token_data.get("no_data"):
-        accounts = ", ".join([f"@{acc['handle']} ({acc['followers']:,})" for acc in token_data["big_accounts"]]) or "None"
+        accounts = ", ".join([f"@{acc['handle']}" for acc in token_data["big_accounts"]]) or "no big names"
         user_msg = (
             f"Token: {query} ({token_data['symbol']}). "
             f"Tweets: {token_data['tweets']}. Momentum: {token_data['momentum']}. "
             f"Sentiment: {token_data['sentiment']}. Accounts: {accounts}. "
-            "Assess trends and risks in a concise, analytical manner."
+            f"Prior: Query: {prior_context['query']}, Response: {prior_context['response']}. "
+            "Give a concise, actionable take like a trader."
         )
     else:
         user_msg = (
-            f"Tweet: {tweet_text}. No token data found. "
-            "Provide analytical insight or analyze X sentiment for the query."
+            f"Query: {tweet_text}. No token data found. "
+            f"Prior: Query: {prior_context['query']}, Response: {prior_context['response']}. "
+            "Engage conversationally with a sharp, analytical edge."
         )
     headers = {
         "Authorization": f"Bearer {GROK_API_KEY}",
@@ -129,7 +166,7 @@ def generate_reply(token_data: dict, query: str, tweet_text: str) -> str:
             {"role": "system", "content": system},
             {"role": "user", "content": user_msg}
         ],
-        "max_tokens": 200,
+        "max_tokens": 280,  # Increased to use full X limit
         "temperature": 0.7
     }
     logger.info(f"Grok request: headers={{'Authorization': 'Bearer [REDACTED]', 'Content-Type': 'application/json'}}, body={body}")
@@ -137,39 +174,46 @@ def generate_reply(token_data: dict, query: str, tweet_text: str) -> str:
         r = requests.post(GROK_URL, json=body, headers=headers, timeout=10)
         if r.status_code == 400:
             logger.error(f"Grok API 400 error: {r.text}")
-            return "Insufficient X data. Query a more active token or topic."
+            return "No real buzz on X for this. Try a token with more noise."
         r.raise_for_status()
         response = r.json()
         logger.info(f"Grok response: {response}")
         text = response["choices"][0]["message"]["content"].strip()
-        return text[:240]
+
+        # Store context in Redis (expires after 1 hour)
+        redis_client.setex(context_key, 3600, json.dumps({"query": query or tweet_text, "response": text}))
+        return text[:280]  # Ensure within X limit
     except requests.RequestException as e:
         logger.error(f"Grok API error: {str(e)}")
-        return "Insufficient X data. Query a more active token or topic."
+        return "No real buzz on X for this. Try a token with more noise."
 
 @app.post("/")
 async def handle_mention(data: dict):
-    """Handle Twitter webhook for @askdegen mentions."""
-    logger.info(f"Received payload: {data}")
+    """Handle X webhook for @askdegen mentions (test mode)."""
+    logger.info(f"Received payload: {json.dumps(data, indent=2)}")
     if "tweet_create_events" not in data or not data["tweet_create_events"]:
-        logger.error(f"Invalid webhook payload: {data}")
+        logger.error(f"Invalid payload: {data}")
         return JSONResponse({"message": "No tweet data"}, status_code=400)
 
     evt = data["tweet_create_events"][0]
     txt = evt.get("text", "")
     user = evt.get("user", {}).get("screen_name", "")
     tid = evt.get("id_str", "")
+    in_reply_to_status_id = evt.get("in_reply_to_status_id_str", None)
 
     if not all([txt, user, tid]):
         logger.error(f"Missing tweet data: text={txt}, user={user}, tid={tid}")
         return JSONResponse({"message": "Invalid tweet data"}, status_code=400)
 
-    logger.info(f"Processing tweet ID: {tid}, user: {user}, text: {txt}")
+    logger.info(f"Processing tweet ID: {tid}, user: {user}, text: {txt}, in_reply_to: {in_reply_to_status_id}")
 
-    # Validate tid early
-    if not tid.isdigit() or len(tid) < 15:
-        logger.error(f"Invalid tweet ID: {tid}")
-        # Generate reply anyway for standalone post
+    # Use in_reply_to_status_id if available (for threaded conversations)
+    reply_tid = in_reply_to_status_id if in_reply_to_status_id and in_reply_to_status_id.isdigit() else tid
+
+    # Validate reply_tid
+    if not reply_tid.isdigit() or len(reply_tid) < 15:
+        logger.error messege = f"Invalid reply tweet ID: {reply_tid}"
+        # Generate reply for standalone post
         words = txt.split()
         tok = None
         for w in words:
@@ -182,15 +226,14 @@ async def handle_mention(data: dict):
 
         try:
             if tok:
-                token_data = fetch_token_data(tok)
-                reply_content = generate_reply(token_data, tok, txt)
+                token_data = fetch_token_data(tok, tid)
+                reply_content = generate_reply(token_data, tok, txt, tid)
             else:
                 token_data = {"no_data": True}
-                reply_content = generate_reply(token_data, "", txt)
+                reply_content = generate_reply(token_data, "", txt, tid)
 
-            reply = f"Re: {txt[:50]}... {reply_content}"[:280]
-            tweet_response = x_client.create_tweet(text=reply)
-            logger.info(f"Standalone reply posted due to invalid tid: {reply}, response: {tweet_response}")
+            tweet_response = x_client.create_tweet(text=reply_content)
+            logger.info(f"Standalone reply posted: {reply_content}, response: {tweet_response}")
             return JSONResponse({"message": "Replied to mention (standalone)"}, status_code=200)
         except tweepy.TweepyException as e:
             logger.error(f"Failed to post standalone reply: {str(e)}")
@@ -210,27 +253,26 @@ async def handle_mention(data: dict):
     try:
         if tok:
             # Token or address mentioned
-            token_data = fetch_token_data(tok)
-            reply_content = generate_reply(token_data, tok, txt)
+            token_data = fetch_token_data(tok, tid)
+            reply_content = generate_reply(token_data, tok, txt, tid)
         else:
             # No token/address, conversational reply
             token_data = {"no_data": True}
-            reply_content = generate_reply(token_data, "", txt)
+            reply_content = generate_reply(token_data, "", txt, tid)
 
-        reply = reply_content  # No @user tag
-        max_reply_length = 280 - 1
+        reply = reply_content
+        max_reply_length = 280
         reply = reply[:max_reply_length]
 
         try:
-            tweet_response = x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(tid))
-            logger.info(f"Replied to tweet {tid} with: {reply}, response: {tweet_response}")
+            tweet_response = x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(reply_tid))
+            logger.info(f"Replied to tweet {reply_tid} with: {reply}, response: {tweet_response}")
         except tweepy.errors.Forbidden as e:
-            logger.warning(f"Threaded reply failed for tweet {tid}: {str(e)}; posting standalone")
-            reply = f"Re: {txt[:50]}... {reply}"[:280]
+            logger.warning(f"Threaded reply failed for tweet {reply_tid}: {str(e)}; posting standalone")
             tweet_response = x_client.create_tweet(text=reply)
             logger.info(f"Standalone reply posted: {reply}, response: {tweet_response}")
         except tweepy.TweepyException as e:
-            logger.error(f"Failed to post reply to tweet {tid}: {str(e)}")
+            logger.error(f"Failed to post reply to tweet {reply_tid}: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Failed to post reply: {str(e)}")
 
         return JSONResponse({"message": "Replied to mention"}, status_code=200)

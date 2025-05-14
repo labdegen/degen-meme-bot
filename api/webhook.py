@@ -279,7 +279,7 @@ async def handle_mention(data: dict):
 
             reply = reply_content
             max_reply_length = 280
-            reply = reply[:max_reply_length]
+            reply = reply[:max_length]
 
             try:
                 tweet_response = x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(reply_tid))
@@ -298,3 +298,6 @@ async def handle_mention(data: dict):
         except Exception as e:
             logger.error(f"handle_mention error: {str(e)}")
             return JSONResponse({"error": str(e)}, status_code=500)
+    except Exception as e:
+        logger.error(f"Top-level error in handle_mention: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")

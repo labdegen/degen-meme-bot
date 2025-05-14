@@ -76,12 +76,16 @@ def fetch_dexscreener_data(address: str) -> dict:
             logger.warning(f"No DexScreener data for {address}")
             return {}
         pair = data[0]
+        # Convert string values to appropriate types
+        price = pair.get("priceUsd", "0")
+        liquidity = pair.get("liquidityUsd", "0")
+        volume = pair.get("volumeUsd", "0")
         return {
             "token_name": pair.get("tokenName", "Unknown"),
             "token_symbol": pair.get("tokenSymbol", "Unknown"),
-            "price_usd": pair.get("priceUsd", 0.0),
-            "liquidity_usd": pair.get("liquidityUsd", 0.0),
-            "volume_usd": pair.get("volumeUsd", 0.0),
+            "price_usd": float(price) if isinstance(price, str) else price,
+            "liquidity_usd": float(liquidity) if isinstance(liquidity, str) else liquidity,
+            "volume_usd": float(volume) if isinstance(volume, str) else volume,
             "transaction_count": pair.get("transactionCount", 0),
             "market_cap_usd": pair.get("marketCapUsd", 0.0)
         }
@@ -92,11 +96,11 @@ def fetch_dexscreener_data(address: str) -> dict:
 def resolve_token(query: str) -> tuple:
     """Resolve query to $TOKEN, mapping contract addresses via X search."""
     if HEX_REGEX.match(query):
-        # Contract address: search X for $TOKEN and fetch DexScreener data
+        # Contract address: try DexScreener first
         dexscreener_data = fetch_dexscreener_data(query)
-        if dexscreener_data and dexscreener_data.get("token_symbol"):
+        if dexscreener_data and dexscreener_data.get("token_symbol") != "Unknown":
             return dexscreener_data["token_symbol"].upper(), True, dexscreener_data
-        # Fallback to Grok if DexScreener fails
+        # Fallback to Grok
         system = (
             "You are a crypto analyst. Given a contract address, search X posts to identify the corresponding $TOKEN ticker. "
             "Return JSON: {'token': str}"
@@ -115,13 +119,13 @@ def resolve_token(query: str) -> tuple:
             response = r.json()
             text = response["choices"][0]["message"]["content"].strip()
             data = json.loads(text)
-            token = data.get("token", query).replace("$", "").upper()
+            token = data.get("token", "Unknown").replace("$", "").upper()
             return token, True, fetch_dexscreener_data(query)
         except (requests.RequestException, json.JSONDecodeError, KeyError) as e:
             logger.error(f"Failed to resolve contract address {query}: {str(e)}")
-            return query, True, {}
+            return "Unknown", True, dexscreener_data
     elif query.lower().startswith("most hyped token"):
-        # Hyped token query: find top $TOKEN by volume/momentum
+        # Hyped token query
         today = datetime.utcnow().strftime("%Y-%m-%d")
         yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
         system = (
@@ -155,7 +159,6 @@ def resolve_token(query: str) -> tuple:
 def fetch_token_data(query: str, tid: str, dexscreener_data: dict) -> dict:
     """Use Grok to analyze X data for token sentiment, mentions, and momentum."""
     logger.info(f"Fetching X data for query: {query}, tid: {tid}")
-    # Check Redis for prior context
     context_key = f"conversation:{tid}"
     try:
         context = redis_client.get(context_key)
@@ -164,7 +167,6 @@ def fetch_token_data(query: str, tid: str, dexscreener_data: dict) -> dict:
         logger.error(f"Redis get failed: {str(e)}")
         prior_context = {"query": "", "response": ""}
 
-    # Calculate date range (past 7 days or 1 day for hyped token)
     today = datetime.utcnow()
     if "most hyped token" in prior_context["query"].lower() or "most hyped token" in query.lower():
         start_date = (today - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -181,23 +183,14 @@ def fetch_token_data(query: str, tid: str, dexscreener_data: dict) -> dict:
         f"Analyze X posts for {query} from {start_date} to {end_date}. "
         f"DexScreener data: {json.dumps(dexscreener_data)}. "
         f"Prior context: Query: {prior_context['query']}, Response: {prior_context['response']}. "
-        "Provide: "
-        "1. Tweet count (e.g., '50-100'). "
-        "2. Momentum (high/medium/low). "
-        "3. Sentiment (bullish/bearish/neutral, with %). "
+        "Provide: 1. Tweet count (e.g., '50-100'). 2. Momentum (high/medium/low). 3. Sentiment (bullish/bearish/neutral, with %). "
         "4. Number of big accounts (>10,000 followers, active in last 30 days). "
         "Return JSON: {'tweets': str, 'momentum': str, 'sentiment': str, 'big_accounts_count': int}"
     )
-    headers = {
-        "Authorization": f"Bearer {GROK_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
     body = {
         "model": "grok-3",
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_msg}
-        ],
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
         "max_tokens": 300,
         "temperature": 0.7
     }
@@ -231,7 +224,6 @@ def fetch_token_data(query: str, tid: str, dexscreener_data: dict) -> dict:
 def generate_reply(token_data: dict, query: str, tweet_text: str, tid: str, is_contract_address: bool, dexscreener_data: dict) -> str:
     """Generate a natural, conversational reply with context retention."""
     logger.info(f"Generating reply for query: {query}, tid: {tid}, is_contract_address: {is_contract_address}")
-    # Check Redis for prior context
     context_key = f"conversation:{tid}"
     try:
         context = redis_client.get(context_key)
@@ -245,10 +237,17 @@ def generate_reply(token_data: dict, query: str, tweet_text: str, tid: str, is_c
         "Use DexScreener (price, liquidity, volume) and X data (tweets, sentiment, big accounts) to call out trends, risks. "
         "No account handles, no contract addresses. Use context, stay sharp."
     )
-    if not token_data.get("no_data"):
+    if not token_data.get("no_data") and query != "UNKNOWN":
+        # Convert DexScreener values to safe formats
+        price = dexscreener_data.get("price_usd", 0.0)
+        liquidity = dexscreener_data.get("liquidity_usd", 0.0)
+        volume = dexscreener_data.get("volume_usd", 0.0)
+        price_str = f"{float(price):.4f}" if price else "0.0000"
+        liquidity_str = f"{int(float(liquidity))}" if liquidity else "0"
+        volume_str = f"{int(float(volume))}" if volume else "0"
         user_msg = (
             f"Token: {query} ({token_data['symbol']}). "
-            f"DexScreener: Price ${dexscreener_data.get('price_usd', 0):.4f}, Liquidity ${dexscreener_data.get('liquidity_usd', 0):.0f}, Volume ${dexscreener_data.get('volume_usd', 0):.0f}. "
+            f"DexScreener: Price ${price_str}, Liquidity ${liquidity_str}, Volume ${volume_str}. "
             f"X: Tweets {token_data['tweets']}, Sentiment {token_data['sentiment']}, Big accounts {token_data['big_accounts_count']}. "
             f"Prior: Query: {prior_context['query']}, Response: {prior_context['response']}. "
             "Give a concise, actionable take, max 200 chars."
@@ -260,16 +259,10 @@ def generate_reply(token_data: dict, query: str, tweet_text: str, tid: str, is_c
             f"Prior: Query: {prior_context['query']}, Response: {prior_context['response']}. "
             "Engage with a sharp edge, max 200 chars."
         )
-    headers = {
-        "Authorization": f"Bearer {GROK_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
     body = {
         "model": "grok-3",
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_msg}
-        ],
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
         "max_tokens": 200,
         "temperature": 0.7
     }
@@ -284,7 +277,6 @@ def generate_reply(token_data: dict, query: str, tweet_text: str, tid: str, is_c
         logger.info(f"Grok response: {response}")
         text = response["choices"][0]["message"]["content"].strip()
 
-        # Store context in Redis
         try:
             redis_client.setex(context_key, 3600, json.dumps({"query": query or tweet_text, "response": text}))
         except redis.RedisError as e:
@@ -316,13 +308,10 @@ async def handle_mention(data: dict):
 
         logger.info(f"Processing tweet ID: {tid}, user: {user}, text: {txt}, in_reply_to: {in_reply_to_status_id}")
 
-        # Use in_reply_to_status_id if available (for threaded conversations)
         reply_tid = in_reply_to_status_id if in_reply_to_status_id and in_reply_to_status_id.isdigit() else tid
 
-        # Validate reply_tid
         if not reply_tid.isdigit() or len(reply_tid) < 15:
             logger.error(f"Invalid reply tweet ID: {reply_tid}")
-            # Generate reply for standalone post
             words = txt.split()
             tok = None
             for w in words:
@@ -352,7 +341,6 @@ async def handle_mention(data: dict):
                 logger.error(f"Failed to post standalone reply: {str(e)}")
                 raise HTTPException(status_code=500, detail=f"Failed to post reply: {str(e)}")
 
-        # Check for $TOKEN, contract address, or hyped token query
         words = txt.split()
         tok = None
         for w in words:

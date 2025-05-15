@@ -1,4 +1,3 @@
-# api/webhook.py
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 import tweepy
@@ -10,6 +9,7 @@ import re
 import redis
 import json
 from datetime import datetime, timedelta
+from time import sleep
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -61,37 +61,66 @@ except redis.RedisError as e:
 GROK_URL = "https://api.x.ai/v1/chat/completions"
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 DEXSCREENER_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
+REDIS_CACHE_PREFIX = "dexscreener:"
 
 # Token regex for $TOKEN or contract address
 HEX_REGEX = re.compile(r"^(0x[a-fA-F0-9]{40}|[A-Za-z0-9]{43,44})$")
 
-def fetch_dexscreener_data(address: str) -> dict:
-    """Fetch token metrics from DexScreener API."""
+def fetch_dexscreener_data(address: str, retries=3, backoff=2) -> dict:
+    """Fetch token metrics from DexScreener API with caching and retries."""
+    cache_key = f"{REDIS_CACHE_PREFIX}{address}"
     logger.info(f"Fetching DexScreener data for address: {address}")
+    
+    # Check Redis cache
     try:
-        response = requests.get(f"{DEXSCREENER_URL}{address}", timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        if not data or not isinstance(data, list) or not data[0]:
-            logger.warning(f"No DexScreener data for {address}")
+        cached = redis_client.get(cache_key)
+        if cached:
+            logger.info(f"Cache hit for {address}")
+            return json.loads(cached)
+    except redis.RedisError as e:
+        logger.error(f"Redis cache get failed: {str(e)}")
+
+    for attempt in range(retries):
+        try:
+            response = requests.get(f"{DEXSCREENER_URL}{address}", timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if not data or not isinstance(data, list) or not data[0]:
+                logger.warning(f"No DexScreener data for {address}: {json.dumps(data)}")
+                return {}
+            pair = data[0]
+            price = pair.get("priceUsd", "0")
+            liquidity = pair.get("liquidity", {}).get("usd", 0)
+            volume = pair.get("volume", {}).get("h24", 0)
+            txns = pair.get("txns", {}).get("h24", {})
+            result = {
+                "token_name": pair.get("baseToken", {}).get("name", "Unknown"),
+                "token_symbol": pair.get("baseToken", {}).get("symbol", "Unknown"),
+                "price_usd": float(price) if isinstance(price, str) else price,
+                "liquidity_usd": float(liquidity) if isinstance(liquidity, str) else liquidity,
+                "volume_usd": float(volume) if isinstance(volume, str) else volume,
+                "transaction_count": txns.get("buys", 0) + txns.get("sells", 0),
+                "market_cap_usd": pair.get("marketCap", 0.0)
+            }
+            # Cache result for 5 minutes
+            try:
+                redis_client.setex(cache_key, 300, json.dumps(result))
+            except redis.RedisError as e:
+                logger.error(f"Redis cache set failed: {str(e)}")
+            return result
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429 and attempt < retries - 1:
+                logger.warning(f"Rate limit hit for {address}, retrying in {backoff}s...")
+                sleep(backoff)
+                backoff *= 2
+                continue
+            logger.error(f"DexScreener API error for {address}: {str(e)}")
             return {}
-        pair = data[0]
-        # Convert string values to appropriate types
-        price = pair.get("priceUsd", "0")
-        liquidity = pair.get("liquidityUsd", "0")
-        volume = pair.get("volumeUsd", "0")
-        return {
-            "token_name": pair.get("tokenName", "Unknown"),
-            "token_symbol": pair.get("tokenSymbol", "Unknown"),
-            "price_usd": float(price) if isinstance(price, str) else price,
-            "liquidity_usd": float(liquidity) if isinstance(liquidity, str) else liquidity,
-            "volume_usd": float(volume) if isinstance(volume, str) else volume,
-            "transaction_count": pair.get("transactionCount", 0),
-            "market_cap_usd": pair.get("marketCapUsd", 0.0)
-        }
-    except requests.RequestException as e:
-        logger.error(f"DexScreener API error for {address}: {str(e)}")
-        return {}
+        except requests.RequestException as e:
+            logger.error(f"DexScreener API error for {address}: {str(e)}")
+            return {}
+    logger.error(f"Exhausted retries for {address}")
+    return {}
 
 def resolve_token(query: str) -> tuple:
     """Resolve query to $TOKEN, mapping contract addresses via X search."""
@@ -100,6 +129,20 @@ def resolve_token(query: str) -> tuple:
         dexscreener_data = fetch_dexscreener_data(query)
         if dexscreener_data and dexscreener_data.get("token_symbol") != "Unknown":
             return dexscreener_data["token_symbol"].upper(), True, dexscreener_data
+        # Try DexScreener search endpoint
+        try:
+            search_url = f"https://api.dexscreener.com/latest/dex/search?q={query}"
+            response = requests.get(search_url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if data and isinstance(data, list) and data[0]:
+                pair = data[0]
+                token_symbol = pair.get("baseToken", {}).get("symbol", "Unknown").upper()
+                token_address = pair.get("baseToken", {}).get("address", query)
+                dexscreener_data = fetch_dexscreener_data(token_address)
+                return token_symbol, True, dexscreener_data
+        except requests.RequestException as e:
+            logger.error(f"DexScreener search error for {query}: {str(e)}")
         # Fallback to Grok
         system = (
             "You are a crypto analyst. Given a contract address, search X posts to identify the corresponding $TOKEN ticker. "
@@ -120,12 +163,12 @@ def resolve_token(query: str) -> tuple:
             text = response["choices"][0]["message"]["content"].strip()
             data = json.loads(text)
             token = data.get("token", "Unknown").replace("$", "").upper()
-            return token, True, fetch_dexscreener_data(query)
+            dexscreener_data = fetch_dexscreener_data(query)
+            return token, True, dexscreener_data
         except (requests.RequestException, json.JSONDecodeError, KeyError) as e:
             logger.error(f"Failed to resolve contract address {query}: {str(e)}")
             return "Unknown", True, dexscreener_data
     elif query.lower().startswith("most hyped token"):
-        # Hyped token query
         today = datetime.utcnow().strftime("%Y-%m-%d")
         yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
         system = (
@@ -147,14 +190,42 @@ def resolve_token(query: str) -> tuple:
             text = response["choices"][0]["message"]["content"].strip()
             data = json.loads(text)
             token = data.get("token", "Unknown").replace("$", "").upper()
-            return token, False, fetch_dexscreener_data(token)
+            # Use search endpoint to find contract address
+            search_url = f"https://api.dexscreener.com/latest/dex/search?q={token}"
+            try:
+                response = requests.get(search_url, timeout=10)
+                response.raise_for_status()
+                data = response.json()
+                if data and isinstance(data, list) and data[0]:
+                    pair = data[0]
+                    token_address = pair.get("baseToken", {}).get("address", "")
+                    dexscreener_data = fetch_dexscreener_data(token_address)
+                    return token, False, dexscreener_data
+            except requests.RequestException as e:
+                logger.error(f"DexScreener search error for {token}: {str(e)}")
+            return token, False, {}
         except (requests.RequestException, json.JSONDecodeError, KeyError) as e:
             logger.error(f"Failed to find hyped token: {str(e)}")
             return "Unknown", False, {}
     else:
-        # Assume $TOKEN or plain token
+        # Assume $TOKEN or plain token; use search endpoint to find address
         token = query.replace("$", "").upper()
-        return token, False, fetch_dexscreener_data(token)
+        search_url = f"https://api.dexscreener.com/latest/dex/search?q={token}"
+        try:
+            response = requests.get(search_url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            if data and isinstance(data, list) and data[0]:
+                pair = data[0]
+                token_address = pair.get("baseToken", {}).get("address", "")
+                dexscreener_data = fetch_dexscreener_data(token_address)
+                return token, False, dexscreener_data
+            else:
+                logger.warning(f"No DexScreener search results for {token}")
+                return token, False, {}
+        except requests.RequestException as e:
+            logger.error(f"DexScreener search error for {token}: {str(e)}")
+            return token, False, {}
 
 def fetch_token_data(query: str, tid: str, dexscreener_data: dict) -> dict:
     """Use Grok to analyze X data for token sentiment, mentions, and momentum."""
@@ -237,12 +308,11 @@ def generate_reply(token_data: dict, query: str, tweet_text: str, tid: str, is_c
         "Use DexScreener (price, liquidity, volume) and X data (tweets, sentiment, big accounts) to call out trends, risks. "
         "No account handles, no contract addresses. Use context, stay sharp."
     )
-    if not token_data.get("no_data") and query != "UNKNOWN":
-        # Convert DexScreener values to safe formats
+    if not token_data.get("no_data") and query != "UNKNOWN" and dexscreener_data.get("token_symbol") != "Unknown":
         price = dexscreener_data.get("price_usd", 0.0)
         liquidity = dexscreener_data.get("liquidity_usd", 0.0)
         volume = dexscreener_data.get("volume_usd", 0.0)
-        price_str = f"{float(price):.4f}" if price else "0.0000"
+        price_str = f"{float(price):.6f}" if price else "0.000000"
         liquidity_str = f"{int(float(liquidity))}" if liquidity else "0"
         volume_str = f"{int(float(volume))}" if volume else "0"
         user_msg = (
@@ -257,7 +327,7 @@ def generate_reply(token_data: dict, query: str, tweet_text: str, tid: str, is_c
             f"Query: {tweet_text}. No token data found. "
             f"DexScreener: {json.dumps(dexscreener_data)}. "
             f"Prior: Query: {prior_context['query']}, Response: {prior_context['response']}. "
-            "Engage with a sharp edge, max 200 chars."
+            "Engage with a sharp edge, max 200 chars. Suggest $SOL or $USDC."
         )
     headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
     body = {
@@ -271,7 +341,7 @@ def generate_reply(token_data: dict, query: str, tweet_text: str, tid: str, is_c
         r = requests.post(GROK_URL, json=body, headers=headers, timeout=15)
         if r.status_code == 400:
             logger.error(f"Grok API 400 error: {r.text}")
-            return "No buzz on X. Try a token with juice."
+            return "No buzz on X. Try $SOL or $USDC."
         r.raise_for_status()
         response = r.json()
         logger.info(f"Grok response: {response}")
@@ -285,7 +355,7 @@ def generate_reply(token_data: dict, query: str, tweet_text: str, tid: str, is_c
         return text[:200]
     except requests.RequestException as e:
         logger.error(f"Grok API error: {str(e)}")
-        return "No buzz on X. Try a token with juice."
+        return "No buzz on X. Try $SOL or $USDC."
 
 @app.post("/")
 async def handle_mention(data: dict):

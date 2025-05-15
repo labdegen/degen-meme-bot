@@ -19,25 +19,46 @@ app = FastAPI()
 # Load environment variables
 load_dotenv()
 required_vars = [
-    "X_API_KEY", "X_API_SECRET", "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET",
+    "X_CLIENT_ID", "X_CLIENT_SECRET",  # For OAuth 2.0 Bearer Token refresh
     "GROK_API_KEY", "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"
 ]
 for var in required_vars:
     if not os.getenv(var):
         raise RuntimeError(f"Missing env var: {var}")
 
-# Tweepy client (@askdegen)
-x_client = tweepy.Client(
-    consumer_key=os.getenv("X_API_KEY"),
-    consumer_secret=os.getenv("X_API_SECRET"),
-    access_token=os.getenv("X_ACCESS_TOKEN"),
-    access_token_secret=os.getenv("X_ACCESS_TOKEN_SECRET")
-)
+# Function to get Bearer Token using Client Credentials Flow
+def get_bearer_token(client_id, client_secret):
+    try:
+        auth = requests.auth.HTTPBasicAuth(client_id, client_secret)
+        response = requests.post(
+            "https://api.twitter.com/oauth2/token",
+            auth=auth,
+            data={"grant_type": "client_credentials"},
+            timeout=10
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("token_type") != "bearer":
+            raise RuntimeError("Invalid token type received")
+        return data["access_token"]
+    except Exception as e:
+        logger.error(f"Failed to get Bearer Token: {str(e)}")
+        raise
+
+# Get Bearer Token dynamically
+bearer_token = get_bearer_token(os.getenv("X_CLIENT_ID"), os.getenv("X_CLIENT_SECRET"))
+
+# Tweepy client (@askdegen) with OAuth 2.0 Bearer Token
+x_client = tweepy.Client(bearer_token=bearer_token)
 
 # Get @askdegen's user ID
-askdegen_user = x_client.get_me().data
-ASKDEGEN_ID = askdegen_user.id
-logger.info(f"Authenticated as: {askdegen_user.username}, ID: {ASKDEGEN_ID}")
+try:
+    askdegen_user = x_client.get_me(user_auth=False).data  # user_auth=False for Bearer Token
+    ASKDEGEN_ID = askdegen_user.id
+    logger.info(f"Authenticated as: {askdegen_user.username}, ID: {ASKDEGEN_ID}")
+except Exception as e:
+    logger.error(f"Authentication failed: {str(e)}")
+    raise
 
 # Redis client
 redis_client = redis.Redis(
@@ -87,7 +108,7 @@ def fetch_dexscreener_data(address: str, retries=3, backoff=2) -> dict:
             return result
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 429 and attempt < retries - 1:
-                sleep(backoff)
+                time.sleep(backoff)
                 backoff *= 2
                 continue
             return {}
@@ -128,7 +149,12 @@ def resolve_token(query: str) -> tuple:
         pass
 
     headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
-    body = {"model": "grok-3", "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_msg}], "max_tokens": 100, "temperature": 0.7}
+    body = {
+        "model": "grok-3",
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
+        "max_tokens": 100,
+        "temperature": 0.7
+    }
     try:
         r = requests.post(GROK_URL, json=body, headers=headers, timeout=10)
         data = json.loads(r.json()["choices"][0]["message"]["content"].strip())
@@ -145,12 +171,17 @@ def handle_confession(confession: str, user: str, tid: str) -> str:
     system = "Witty crypto bot. Summarize confession into a fun, anonymized tweet with a challenge. ≤750 chars, use only what's needed. JSON: {'tweet': str}"
     user_msg = f"Confession: {confession}. Hype degen spirit, add challenge, keep it short."
     headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
-    body = {"model": "grok-3", "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_msg}], "max_tokens": 750, "temperature": 0.7}
+    body = {
+        "model": "grok-3",
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
+        "max_tokens": 750,
+        "temperature": 0.7
+    }
     try:
         r = requests.post(GROK_URL, json=body, headers=headers, timeout=10)
         data = json.loads(r.json()["choices"][0]["message"]["content"].strip())
         tweet = data.get("tweet", "Degen spilled a wild tale! Share yours! #DegenConfession")[:750]
-        tweet_response = x_client.create_tweet(text=tweet)
+        tweet_response = x_client.create_tweet(text=tweet, user_auth=False)
         link = f"https://x.com/askdegen/status/{tweet_response.data['id']}"
         return f"Your confession's live! See: {link}"
     except Exception as e:
@@ -176,7 +207,12 @@ def analyze_hype(query: str, token: str, address: str, dexscreener_data: dict, t
         f"Fun, short reply, hype score. {'Stay positive for $DEGEN.' if is_degen else ''}"
     )
     headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
-    body = {"model": "grok-3", "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_msg}], "max_tokens": 150, "temperature": 0.7}
+    body = {
+        "model": "grok-3",
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
+        "max_tokens": 150,
+        "temperature": 0.7
+    }
     try:
         r = requests.post(GROK_URL, json=body, headers=headers, timeout=15)
         data = json.loads(r.json()["choices"][0]["message"]["content"].strip())
@@ -219,7 +255,8 @@ async def poll_mentions():
             tweet_fields=["id", "text", "author_id", "in_reply_to_status_id"],
             user_fields=["username"],
             expansions=["author_id"],
-            max_results=10
+            max_results=10,
+            user_auth=False  # Use Bearer Token
         )
         if tweets.data:
             users = {u.id: u.username for u in tweets.includes.get("users", [])}
@@ -283,11 +320,11 @@ async def handle_mention(data: dict):
             reply = analyze_hype(query, token, address, data, tid)
 
         try:
-            x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(reply_tid))
+            x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(reply_tid), user_auth=False)
             redis_client.incr(f"{REDIS_CACHE_PREFIX}post_count")
             logger.info(f"Replied to mention: {reply} to tweet {reply_tid}")
         except tweepy.errors.Forbidden:
-            x_client.create_tweet(text=reply)
+            x_client.create_tweet(text=reply, user_auth=False)
             redis_client.incr(f"{REDIS_CACHE_PREFIX}post_count")
             logger.info(f"Created new tweet for mention: {reply} (couldn't reply)")
 
@@ -300,7 +337,7 @@ async def poll_mentions_loop():
     """Loop to poll mentions with dynamic frequency."""
     while True:
         last_mention = redis_client.get(f"{REDIS_CACHE_PREFIX}last_mention")
-        sleep_time = 90 if last_mention and (int(time.time()) - int(last_mention) < 3600) else 1800  # 90s if active within last hour, else 30min
+        sleep_time = 90 if last_mention and (int(time.time()) - int(last_mention) < 3600) else 1800  # 90s if active, else 30min
         await poll_mentions()
         await asyncio.sleep(sleep_time)
 

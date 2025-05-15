@@ -19,41 +19,41 @@ app = FastAPI()
 # Load environment variables
 load_dotenv()
 required_vars = [
-    "X_CLIENT_ID", "X_CLIENT_SECRET",  # For OAuth 2.0 Bearer Token refresh
+    "X_API_KEY", "X_API_KEY_SECRET",  # OAuth 1.0a Consumer Keys
+    "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET",  # OAuth 1.0a Access Tokens
     "GROK_API_KEY", "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"
 ]
 for var in required_vars:
     if not os.getenv(var):
         raise RuntimeError(f"Missing env var: {var}")
 
-# Function to get Bearer Token using Client Credentials Flow
-def get_bearer_token(client_id, client_secret):
-    try:
-        auth = requests.auth.HTTPBasicAuth(client_id, client_secret)
-        response = requests.post(
-            "https://api.twitter.com/oauth2/token",
-            auth=auth,
-            data={"grant_type": "client_credentials"},
-            timeout=10
-        )
-        response.raise_for_status()
-        data = response.json()
-        if data.get("token_type") != "bearer":
-            raise RuntimeError("Invalid token type received")
-        return data["access_token"]
-    except Exception as e:
-        logger.error(f"Failed to get Bearer Token: {str(e)}")
-        raise
+# Set up X client with OAuth 1.0a credentials
+api_key = os.getenv("X_API_KEY")
+api_key_secret = os.getenv("X_API_KEY_SECRET")
+access_token = os.getenv("X_ACCESS_TOKEN")
+access_token_secret = os.getenv("X_ACCESS_TOKEN_SECRET")
 
-# Get Bearer Token dynamically
-bearer_token = get_bearer_token(os.getenv("X_CLIENT_ID"), os.getenv("X_CLIENT_SECRET"))
+# Create Tweepy Client with OAuth 1.0a authentication
+x_client = tweepy.Client(
+    consumer_key=api_key,
+    consumer_secret=api_key_secret,
+    access_token=access_token, 
+    access_token_secret=access_token_secret
+)
 
-# Tweepy client (@askdegen) with OAuth 2.0 Bearer Token
-x_client = tweepy.Client(bearer_token=bearer_token)
+# Create Tweepy API v1.1 object for backward compatibility if needed
+x_api = tweepy.API(
+    tweepy.OAuth1UserHandler(
+        consumer_key=api_key,
+        consumer_secret=api_key_secret,
+        access_token=access_token,
+        access_token_secret=access_token_secret
+    )
+)
 
 # Get @askdegen's user ID
 try:
-    askdegen_user = x_client.get_me(user_auth=False).data  # user_auth=False for Bearer Token
+    askdegen_user = x_client.get_me().data
     ASKDEGEN_ID = askdegen_user.id
     logger.info(f"Authenticated as: {askdegen_user.username}, ID: {ASKDEGEN_ID}")
 except Exception as e:
@@ -181,7 +181,7 @@ def handle_confession(confession: str, user: str, tid: str) -> str:
         r = requests.post(GROK_URL, json=body, headers=headers, timeout=10)
         data = json.loads(r.json()["choices"][0]["message"]["content"].strip())
         tweet = data.get("tweet", "Degen spilled a wild tale! Share yours! #DegenConfession")[:750]
-        tweet_response = x_client.create_tweet(text=tweet, user_auth=False)
+        tweet_response = x_client.create_tweet(text=tweet)
         link = f"https://x.com/askdegen/status/{tweet_response.data['id']}"
         return f"Your confession's live! See: {link}"
     except Exception as e:
@@ -249,15 +249,16 @@ async def poll_mentions():
             return
         redis_client.incrby(f"{REDIS_CACHE_PREFIX}read_count", 10)  # 10 tweets per request
 
+        # Using OAuth 1.0a authentication to get mentions
         tweets = x_client.get_users_mentions(
             id=ASKDEGEN_ID,
             since_id=last_tweet_id,
             tweet_fields=["id", "text", "author_id", "in_reply_to_status_id"],
             user_fields=["username"],
             expansions=["author_id"],
-            max_results=10,
-            user_auth=False  # Use Bearer Token
+            max_results=10
         )
+        
         if tweets.data:
             users = {u.id: u.username for u in tweets.includes.get("users", [])}
             for tweet in reversed(tweets.data):
@@ -320,11 +321,12 @@ async def handle_mention(data: dict):
             reply = analyze_hype(query, token, address, data, tid)
 
         try:
-            x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(reply_tid), user_auth=False)
+            # Using OAuth 1.0a to create replies
+            x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(reply_tid))
             redis_client.incr(f"{REDIS_CACHE_PREFIX}post_count")
             logger.info(f"Replied to mention: {reply} to tweet {reply_tid}")
         except tweepy.errors.Forbidden:
-            x_client.create_tweet(text=reply, user_auth=False)
+            x_client.create_tweet(text=reply)
             redis_client.incr(f"{REDIS_CACHE_PREFIX}post_count")
             logger.info(f"Created new tweet for mention: {reply} (couldn't reply)")
 

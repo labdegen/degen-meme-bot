@@ -186,11 +186,11 @@ def handle_confession(confession: str, user: str, tid: str) -> str:
         "temperature": 0.7
     }
     try:
-        r       = requests.post(GROK_URL, json=body, headers=headers, timeout=10)
-        data    = json.loads(r.json()["choices"][0]["message"]["content"].strip())
-        tweet   = data.get("tweet", "Degen spilled a wild tale! Share yours! #DegenConfession")[:750]
+        r        = requests.post(GROK_URL, json=body, headers=headers, timeout=10)
+        data     = json.loads(r.json()["choices"][0]["message"]["content"].strip())
+        tweet    = data.get("tweet", "Degen spilled a wild tale! Share yours! #DegenConfession")[:750]
         response = x_client.create_tweet(text=tweet)
-        link    = f"https://x.com/askdegen/status/{response.data['id']}"
+        link     = f"https://x.com/askdegen/status/{response.data['id']}"
         return f"Your confession's live! See: {link}"
     except Exception as e:
         logger.error(f"Confession category_id=confession_error, error={str(e)}")
@@ -207,12 +207,13 @@ def analyze_hype(query: str, token: str, address: str, dexscreener_data: dict, t
 
     is_degen = token == "DEGEN" or address == DEGEN_ADDRESS
     system = (
-        "Witty crypto analyst. Analyze coin hype from X and market data. For $DEGEN, stay positive, compare to $DOGE/$SHIB's ups/downs. "
+        "Witty crypto analyst. Analyze coin hype from X and market data. "
+        "For $DEGEN, stay positive, compare to $DOGE/$SHIB's ups/downs. "
         "Reply ≤150 chars, 1-2 sentences. JSON: {'reply': str, 'hype_score': int}"
     )
     user_msg = (
-        f"Coin: {token}. Market: {json.dumps(dexscreener_data)}. Prior: Query: {prior_context['query']}, "
-        f"Reply: {prior_context['response']}. Fun, short reply, hype score. "
+        f"Coin: {token}. Market: {json.dumps(dexscreener_data)}. "
+        f"Prior: Query: {prior_context['query']}, Reply: {prior_context['response']}. "
         + ("Stay positive for $DEGEN." if is_degen else "")
     )
     headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
@@ -238,7 +239,10 @@ def analyze_hype(query: str, token: str, address: str, dexscreener_data: dict, t
 async def sleep_until_next_reset():
     """Sleep until the next daily reset at 9:00 AM EDT."""
     now         = time.time()
-    target_time = time.mktime(time.strptime(f"{time.strftime('%Y-%m-%d')} 09:00:00", "%Y-%m-%d %H:%M:%S")) - (4 * 3600)
+    target_time = (
+        time.mktime(time.strptime(f"{time.strftime('%Y-%m-%d')} 09:00:00", "%Y-%m-%d %H:%M:%S"))
+        - (4 * 3600)
+    )
     if now >= target_time:
         target_time += 86400
     sleep_duration = target_time - now
@@ -264,7 +268,7 @@ async def poll_mentions():
         tweets = x_client.get_users_mentions(
             id           = ASKDEGEN_ID,
             since_id     = last_tweet_id,
-            tweet_fields = ["id", "text", "author_id", "in_reply_to_status_id"],
+            tweet_fields = ["id", "text", "author_id"],  # removed invalid field
             user_fields  = ["username"],
             expansions   = ["author_id"],
             max_results  = 10
@@ -279,8 +283,7 @@ async def poll_mentions():
                         {
                             "id_str": str(tweet.id),
                             "text": tweet.text,
-                            "user": {"screen_name": users.get(tweet.author_id, "unknown")},
-                            "in_reply_to_status_id_str": str(tweet.in_reply_to_status_id) if tweet.in_reply_to_status_id else None
+                            "user": {"screen_name": users.get(tweet.author_id, "unknown")}
                         }
                     ]
                 }
@@ -310,7 +313,7 @@ async def handle_mention(data: dict):
         txt       = evt.get("text", "").replace("@askdegen", "").strip()
         user      = evt.get("user", {}).get("screen_name", "")
         tid       = evt.get("id_str", "")
-        reply_tid = evt.get("in_reply_to_status_id_str", tid) or tid
+        reply_tid = tid
 
         if not all([txt, user, tid]):
             logger.warning(f"Invalid tweet data: txt={txt}, user={user}, tid={tid}")

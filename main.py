@@ -19,42 +19,44 @@ app = FastAPI()
 # Load environment variables
 load_dotenv()
 required_vars = [
-    "X_API_KEY", "X_API_KEY_SECRET",  # OAuth 1.0a Consumer Keys
-    "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET",  # OAuth 1.0a Access Tokens
+    "X_API_KEY", "X_API_KEY_SECRET",           # OAuth 1.0a Consumer Keys
+    "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET", # OAuth 1.0a Access Tokens
+    "X_BEARER_TOKEN",                          # OAuth 2.0 Bearer Token (for v2 reads)
     "GROK_API_KEY", "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"
 ]
 for var in required_vars:
     if not os.getenv(var):
         raise RuntimeError(f"Missing env var: {var}")
 
-# Set up X client with OAuth 1.0a credentials
-api_key = os.getenv("X_API_KEY")
-api_key_secret = os.getenv("X_API_KEY_SECRET")
-access_token = os.getenv("X_ACCESS_TOKEN")
-access_token_secret = os.getenv("X_ACCESS_TOKEN_SECRET")
+# Set up X client with both OAuth 1.0a and OAuth 2.0 Bearer Token
+api_key              = os.getenv("X_API_KEY")
+api_key_secret       = os.getenv("X_API_KEY_SECRET")
+access_token         = os.getenv("X_ACCESS_TOKEN")
+access_token_secret  = os.getenv("X_ACCESS_TOKEN_SECRET")
+bearer_token         = os.getenv("X_BEARER_TOKEN")
 
-# Create Tweepy Client with OAuth 1.0a authentication
 x_client = tweepy.Client(
-    consumer_key=api_key,
-    consumer_secret=api_key_secret,
-    access_token=access_token, 
-    access_token_secret=access_token_secret
+    bearer_token        = bearer_token,
+    consumer_key        = api_key,
+    consumer_secret     = api_key_secret,
+    access_token        = access_token,
+    access_token_secret = access_token_secret,
 )
 
 # Create Tweepy API v1.1 object for backward compatibility if needed
 x_api = tweepy.API(
     tweepy.OAuth1UserHandler(
-        consumer_key=api_key,
-        consumer_secret=api_key_secret,
-        access_token=access_token,
-        access_token_secret=access_token_secret
+        consumer_key        = api_key,
+        consumer_secret     = api_key_secret,
+        access_token        = access_token,
+        access_token_secret = access_token_secret
     )
 )
 
 # Get @askdegen's user ID
 try:
     askdegen_user = x_client.get_me().data
-    ASKDEGEN_ID = askdegen_user.id
+    ASKDEGEN_ID   = askdegen_user.id
     logger.info(f"Authenticated as: {askdegen_user.username}, ID: {ASKDEGEN_ID}")
 except Exception as e:
     logger.error(f"Authentication failed: {str(e)}")
@@ -62,22 +64,22 @@ except Exception as e:
 
 # Redis client
 redis_client = redis.Redis(
-    host=os.getenv("REDIS_HOST"),
-    port=int(os.getenv("REDIS_PORT")),
-    password=os.getenv("REDIS_PASSWORD"),
-    decode_responses=True,
-    socket_timeout=5,
-    socket_connect_timeout=5
+    host                   = os.getenv("REDIS_HOST"),
+    port                   = int(os.getenv("REDIS_PORT")),
+    password               = os.getenv("REDIS_PASSWORD"),
+    decode_responses       = True,
+    socket_timeout         = 5,
+    socket_connect_timeout = 5
 )
 redis_client.ping()
 logger.info("Redis connected")
 
 # Config
-GROK_URL = "https://api.x.ai/v1/chat/completions"
-GROK_API_KEY = os.getenv("GROK_API_KEY")
-DEXSCREENER_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
+GROK_URL           = "https://api.x.ai/v1/chat/completions"
+GROK_API_KEY       = os.getenv("GROK_API_KEY")
+DEXSCREENER_URL    = "https://api.dexscreener.com/token-pairs/v1/solana/"
 REDIS_CACHE_PREFIX = "degen:"
-DEGEN_ADDRESS = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
+DEGEN_ADDRESS      = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
 
 def fetch_dexscreener_data(address: str, retries=3, backoff=2) -> dict:
     """Fetch token metrics from DexScreener with caching."""
@@ -133,16 +135,16 @@ def resolve_token(query: str) -> tuple:
         system = "Crypto analyst. Find $TOKEN ticker for Solana address from X. JSON: {'token': str, 'address': str}"
         user_msg = f"Contract: {query}. Find ticker from X."
     else:
-        token = query.replace("$", "").upper()
-        system = "Crypto analyst. Find Solana address for $TOKEN from X. JSON: {'token': str, 'address': str}"
+        token   = query.replace("$", "").upper()
+        system  = "Crypto analyst. Find Solana address for $TOKEN from X. JSON: {'token': str, 'address': str}"
         user_msg = f"Ticker: {token}. Find address from X."
 
     cache_key = f"{REDIS_CACHE_PREFIX}resolve:{query}"
     try:
         cached = redis_client.get(cache_key)
         if cached:
-            data = json.loads(cached)
-            token = data.get("token", "Unknown").upper()
+            data    = json.loads(cached)
+            token   = data.get("token", "Unknown").upper()
             address = data.get("address", "")
             return token, address, fetch_dexscreener_data(address) if address else {}
     except redis.RedisError:
@@ -151,14 +153,17 @@ def resolve_token(query: str) -> tuple:
     headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
     body = {
         "model": "grok-3",
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user_msg}
+        ],
         "max_tokens": 100,
         "temperature": 0.7
     }
     try:
-        r = requests.post(GROK_URL, json=body, headers=headers, timeout=10)
+        r    = requests.post(GROK_URL, json=body, headers=headers, timeout=10)
         data = json.loads(r.json()["choices"][0]["message"]["content"].strip())
-        token = data.get("token", "Unknown").upper()
+        token   = data.get("token", "Unknown").upper()
         address = data.get("address", "")
         redis_client.setex(cache_key, 3600, json.dumps({"token": token, "address": address}))
         return token, address, fetch_dexscreener_data(address) if address else {}
@@ -168,21 +173,24 @@ def resolve_token(query: str) -> tuple:
 
 def handle_confession(confession: str, user: str, tid: str) -> str:
     """Parse and tweet a Degen Confession."""
-    system = "Witty crypto bot. Summarize confession into a fun, anonymized tweet with a challenge. ≤750 chars, use only what's needed. JSON: {'tweet': str}"
+    system   = "Witty crypto bot. Summarize confession into a fun, anonymized tweet with a challenge. ≤750 chars, use only what's needed. JSON: {'tweet': str}"
     user_msg = f"Confession: {confession}. Hype degen spirit, add challenge, keep it short."
-    headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
-    body = {
+    headers  = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
+    body     = {
         "model": "grok-3",
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user_msg}
+        ],
         "max_tokens": 750,
         "temperature": 0.7
     }
     try:
-        r = requests.post(GROK_URL, json=body, headers=headers, timeout=10)
-        data = json.loads(r.json()["choices"][0]["message"]["content"].strip())
-        tweet = data.get("tweet", "Degen spilled a wild tale! Share yours! #DegenConfession")[:750]
-        tweet_response = x_client.create_tweet(text=tweet)
-        link = f"https://x.com/askdegen/status/{tweet_response.data['id']}"
+        r       = requests.post(GROK_URL, json=body, headers=headers, timeout=10)
+        data    = json.loads(r.json()["choices"][0]["message"]["content"].strip())
+        tweet   = data.get("tweet", "Degen spilled a wild tale! Share yours! #DegenConfession")[:750]
+        response = x_client.create_tweet(text=tweet)
+        link    = f"https://x.com/askdegen/status/{response.data['id']}"
         return f"Your confession's live! See: {link}"
     except Exception as e:
         logger.error(f"Confession category_id=confession_error, error={str(e)}")
@@ -192,7 +200,7 @@ def analyze_hype(query: str, token: str, address: str, dexscreener_data: dict, t
     """Analyze hype for a coin with conversation memory."""
     context_key = f"{REDIS_CACHE_PREFIX}context:{tid}"
     try:
-        context = redis_client.get(context_key)
+        context       = redis_client.get(context_key)
         prior_context = json.loads(context) if context else {"query": "", "response": ""}
     except redis.RedisError:
         prior_context = {"query": "", "response": ""}
@@ -203,19 +211,23 @@ def analyze_hype(query: str, token: str, address: str, dexscreener_data: dict, t
         "Reply ≤150 chars, 1-2 sentences. JSON: {'reply': str, 'hype_score': int}"
     )
     user_msg = (
-        f"Coin: {token}. Market: {json.dumps(dexscreener_data)}. Prior: Query: {prior_context['query']}, Reply: {prior_context['response']}. "
-        f"Fun, short reply, hype score. {'Stay positive for $DEGEN.' if is_degen else ''}"
+        f"Coin: {token}. Market: {json.dumps(dexscreener_data)}. Prior: Query: {prior_context['query']}, "
+        f"Reply: {prior_context['response']}. Fun, short reply, hype score. "
+        + ("Stay positive for $DEGEN." if is_degen else "")
     )
     headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
-    body = {
+    body    = {
         "model": "grok-3",
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user_msg}],
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user",   "content": user_msg}
+        ],
         "max_tokens": 150,
         "temperature": 0.7
     }
     try:
-        r = requests.post(GROK_URL, json=body, headers=headers, timeout=15)
-        data = json.loads(r.json()["choices"][0]["message"]["content"].strip())
+        r     = requests.post(GROK_URL, json=body, headers=headers, timeout=15)
+        data  = json.loads(r.json()["choices"][0]["message"]["content"].strip())
         reply = data.get("reply", "No vibe on X. Try $BONK!")[:150]
         redis_client.setex(context_key, 86400, json.dumps({"query": query, "response": reply}))
         return reply
@@ -225,10 +237,10 @@ def analyze_hype(query: str, token: str, address: str, dexscreener_data: dict, t
 
 async def sleep_until_next_reset():
     """Sleep until the next daily reset at 9:00 AM EDT."""
-    now = time.time()
-    target_time = time.mktime(time.strptime(f"{time.strftime('%Y-%m-%d')} 09:00:00", "%Y-%m-%d %H:%M:%S")) - (4 * 3600)  # 9:00 AM EDT (UTC-4)
+    now         = time.time()
+    target_time = time.mktime(time.strptime(f"{time.strftime('%Y-%m-%d')} 09:00:00", "%Y-%m-%d %H:%M:%S")) - (4 * 3600)
     if now >= target_time:
-        target_time += 86400  # Next day
+        target_time += 86400
     sleep_duration = target_time - now
     logger.info(f"Sleeping for {sleep_duration} seconds until next reset at 9:00 AM EDT")
     await asyncio.sleep(sleep_duration)
@@ -243,22 +255,21 @@ async def poll_mentions():
 
     try:
         read_count = int(redis_client.get(f"{REDIS_CACHE_PREFIX}read_count") or 0)
-        if read_count >= 500:  # Stay within ~500 reads/day (15,000/month)
+        if read_count >= 500:
             logger.info("Daily read limit reached, waiting until 9:00 AM EDT")
             await sleep_until_next_reset()
             return
-        redis_client.incrby(f"{REDIS_CACHE_PREFIX}read_count", 10)  # 10 tweets per request
+        redis_client.incrby(f"{REDIS_CACHE_PREFIX}read_count", 10)
 
-        # Using OAuth 1.0a authentication to get mentions
         tweets = x_client.get_users_mentions(
-            id=ASKDEGEN_ID,
-            since_id=last_tweet_id,
-            tweet_fields=["id", "text", "author_id", "in_reply_to_status_id"],
-            user_fields=["username"],
-            expansions=["author_id"],
-            max_results=10
+            id           = ASKDEGEN_ID,
+            since_id     = last_tweet_id,
+            tweet_fields = ["id", "text", "author_id", "in_reply_to_status_id"],
+            user_fields  = ["username"],
+            expansions   = ["author_id"],
+            max_results  = 10
         )
-        
+
         if tweets.data:
             users = {u.id: u.username for u in tweets.includes.get("users", [])}
             for tweet in reversed(tweets.data):
@@ -279,6 +290,7 @@ async def poll_mentions():
                 redis_client.set(f"{REDIS_CACHE_PREFIX}last_mention", int(time.time()))
         else:
             logger.info("No new mentions")
+
     except tweepy.TweepyException as e:
         logger.error(f"Polling mentions category_id=polling_error, error={str(e)}")
         if "Rate limit" in str(e):
@@ -294,14 +306,14 @@ async def handle_mention(data: dict):
             logger.warning("No tweet_create_events in payload")
             return {"message": "No tweet events"}, 400
 
-        evt = data["tweet_create_events"][0]
-        txt = evt.get("text", "").replace("@askdegen", "").strip()
-        user = evt.get("user", {}).get("screen_name", "")
-        tid = evt.get("id_str", "")
+        evt       = data["tweet_create_events"][0]
+        txt       = evt.get("text", "").replace("@askdegen", "").strip()
+        user      = evt.get("user", {}).get("screen_name", "")
+        tid       = evt.get("id_str", "")
         reply_tid = evt.get("in_reply_to_status_id_str", tid) or tid
 
         if not all([txt, user, tid]):
-            logger.warning(f"Invalid tweet data: {txt=}, {user=}, {tid=}")
+            logger.warning(f"Invalid tweet data: txt={txt}, user={user}, tid={tid}")
             return {"message": "Invalid tweet"}, 400
 
         logger.info(f"Processing mention: {tid}, {user}, {txt}")
@@ -314,14 +326,15 @@ async def handle_mention(data: dict):
         if txt.lower().startswith("degen confession:"):
             reply = handle_confession(txt[16:].strip(), user, tid)
         else:
-            query = next((w[1:] for w in txt.split() if w.startswith("$") and len(w) > 1), None) or \
-                    next((w for w in txt.split() if re.match(r"^[A-Za-z0-9]{43,44}$", w)), None) or \
-                    "most hyped coin"
+            query = (
+                next((w[1:] for w in txt.split() if w.startswith("$") and len(w) > 1), None)
+                or next((w for w in txt.split() if re.match(r"^[A-Za-z0-9]{43,44}$", w)), None)
+                or "most hyped coin"
+            )
             token, address, data = resolve_token(query)
             reply = analyze_hype(query, token, address, data, tid)
 
         try:
-            # Using OAuth 1.0a to create replies
             x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(reply_tid))
             redis_client.incr(f"{REDIS_CACHE_PREFIX}post_count")
             logger.info(f"Replied to mention: {reply} to tweet {reply_tid}")
@@ -331,6 +344,7 @@ async def handle_mention(data: dict):
             logger.info(f"Created new tweet for mention: {reply} (couldn't reply)")
 
         return {"message": "Success"}, 200
+
     except Exception as e:
         logger.error(f"Mention category_id=mention_error, error={str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -339,7 +353,7 @@ async def poll_mentions_loop():
     """Loop to poll mentions with dynamic frequency."""
     while True:
         last_mention = redis_client.get(f"{REDIS_CACHE_PREFIX}last_mention")
-        sleep_time = 90 if last_mention and (int(time.time()) - int(last_mention) < 3600) else 1800  # 90s if active, else 30min
+        sleep_time   = 90 if last_mention and (int(time.time()) - int(last_mention) < 3600) else 1800
         await poll_mentions()
         await asyncio.sleep(sleep_time)
 
@@ -353,10 +367,13 @@ async def start_polling():
 async def reset_daily_counters():
     """Reset daily counters at startup if needed."""
     last_reset = redis_client.get(f"{REDIS_CACHE_PREFIX}last_reset")
-    now = time.time()
-    target_time = time.mktime(time.strptime(f"{time.strftime('%Y-%m-%d')} 09:00:00", "%Y-%m-%d %H:%M:%S")) - (4 * 3600)  # 9:00 AM EDT (UTC-4)
+    now        = time.time()
+    target_time = (
+        time.mktime(time.strptime(f"{time.strftime('%Y-%m-%d')} 09:00:00", "%Y-%m-%d %H:%M:%S"))
+        - (4 * 3600)
+    )
     if last_reset and int(last_reset) >= target_time:
-        return  # Already reset today
+        return
     redis_client.set(f"{REDIS_CACHE_PREFIX}read_count", 0)
     redis_client.set(f"{REDIS_CACHE_PREFIX}post_count", 0)
     redis_client.set(f"{REDIS_CACHE_PREFIX}last_reset", int(time.time()))

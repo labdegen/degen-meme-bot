@@ -42,6 +42,10 @@ x_client = tweepy.Client(
     access_token=access_token,
     access_token_secret=access_token_secret,
 )
+# Get own ID
+askdegen_user = x_client.get_me().data
+ASKDEGEN_ID = askdegen_user.id
+logger.info(f"Authenticated as: {askdegen_user.username}, ID: {ASKDEGEN_ID}")
 
 # Redis client
 redis_client = redis.Redis(
@@ -76,8 +80,7 @@ def ask_grok(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str
     headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
     resp = requests.post(GROK_URL, json=body, headers=headers, timeout=15)
     resp.raise_for_status()
-    content = resp.json()
-    return content["choices"][0]["message"]["content"].strip()
+    return resp.json()["choices"][0]["message"]["content"].strip()
 
 # Fetch live data from DexScreener
 def fetch_dexscreener_data(address: str) -> dict:
@@ -86,11 +89,11 @@ def fetch_dexscreener_data(address: str) -> dict:
         cached = redis_client.get(cache_key)
         if cached:
             return json.loads(cached)
-    except Exception:
+    except:
         pass
-    r = requests.get(f"{DEXSCREENER_URL}{address}", timeout=10)
-    r.raise_for_status()
-    data = r.json()[0]
+    resp = requests.get(f"{DEXSCREENER_URL}{address}", timeout=10)
+    resp.raise_for_status()
+    data = resp.json()[0]
     result = {
         "symbol": data["baseToken"]["symbol"],
         "price_usd": float(data.get("priceUsd", 0)),
@@ -118,18 +121,19 @@ def resolve_token(query: str) -> tuple:
     try:
         data = json.loads(out)
         return data.get("symbol"), data.get("address")
-    except json.JSONDecodeError:
+    except:
         return None, None
 
-# Handle a mention event\ nasync def handle_mention(data: dict):
+# Handle a mention event
+async def handle_mention(data: dict):
     evt = data["tweet_create_events"][0]
     txt = evt.get("text", "").replace("@askdegen", "").strip()
     tid = evt.get("id_str")
-
+    
     # Case 1: Degen Confession
     if txt.lower().startswith("degen confession:"):
         reply = ask_grok(
-            "Witty degen bot summarizer: condense and anonymize confession ≤750 chars.",
+            "Witty degen summarizer: anonymize and condense confession ≤750 chars.",
             txt,
             max_tokens=200
         )
@@ -143,7 +147,7 @@ def resolve_token(query: str) -> tuple:
             market_data = fetch_dexscreener_data(address)
             system = (
                 "Dry crypto gambler analyst. Given market data "
-                f"{json.dumps(market_data)}, craft a concise (≤280 chars) degen‐toned tweet about current price action & sentiment."
+                f"{json.dumps(market_data)}, craft a concise (≤280 chars) degen‐toned tweet about price action & sentiment."
             )
             reply = ask_grok(system, txt, max_tokens=150)
 
@@ -176,15 +180,13 @@ async def poll_mentions():
     if not tweets or not tweets.data:
         return
     users = {u.id: u.username for u in tweets.includes.get("users", [])}
-
     for tw in reversed(tweets.data):
         user = users.get(tw.author_id, "unknown")
-        event = {"tweet_create_events": [{
-            "id_str": str(tw.id),
-            "text": tw.text,
-            "user": {"screen_name": user}
-        }]}
-        await handle_mention(event)
+        event = {"tweet_create_events": [{"id_str": str(tw.id), "text": tw.text, "user": {"screen_name": user}}]}
+        try:
+            await handle_mention(event)
+        except Exception as e:
+            logger.error(f"Error handling mention: {e}")
         redis_client.set(f"{REDIS_CACHE_PREFIX}last_tweet_id", tw.id)
         redis_client.set(f"{REDIS_CACHE_PREFIX}last_mention", int(time.time()))
 
@@ -200,10 +202,7 @@ async def reset_daily_counters():
     key = f"{REDIS_CACHE_PREFIX}last_reset"
     last = redis_client.get(key)
     now = time.time()
-    target = time.mktime(time.strptime(
-        f"{time.strftime('%Y-%m-%d')} 09:00:00", "%Y-%m-%d %H:%M:%S"
-    )) - (4 * 3600)
-
+    target = time.mktime(time.strptime(f"{time.strftime('%Y-%m-%d')} 09:00:00", "%Y-%m-%d %H:%M:%S")) - (4 * 3600)
     if not last or int(last) < target:
         redis_client.set(f"{REDIS_CACHE_PREFIX}read_count", 0)
         redis_client.set(f"{REDIS_CACHE_PREFIX}post_count", 0)

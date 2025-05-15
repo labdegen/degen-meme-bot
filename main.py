@@ -355,9 +355,17 @@ async def handle_mention(data: dict):
 async def poll_mentions_loop():
     """Loop to poll mentions with dynamic frequency."""
     while True:
-        last_mention = redis_client.get(f"{REDIS_CACHE_PREFIX}last_mention")
-        sleep_time   = 90 if last_mention and (int(time.time()) - int(last_mention) < 3600) else 1800
+        # 1) always do the lookup first
         await poll_mentions()
+
+        # 2) then re-read last_mention (which poll_mentions() may have just updated)
+        lm = redis_client.get(f"{REDIS_CACHE_PREFIX}last_mention")
+        if lm and (time.time() - int(lm) < 3600):
+            sleep_time = 90      # recent activity → poll again in 90 s
+        else:
+            sleep_time = 1800    # quiet for an hour → slow down to 30 m
+
+        logger.info(f"Sleeping for {sleep_time}s until next poll (last_mention={lm})")
         await asyncio.sleep(sleep_time)
 
 @app.on_event("startup")

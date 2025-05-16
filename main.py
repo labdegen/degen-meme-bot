@@ -84,7 +84,6 @@ DEGEN_KB = [
 ]
 
 # Helpers
-
 def ask_grok(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str:
     body = {
         "model": "grok-3",
@@ -106,7 +105,7 @@ def ask_perplexity(system_prompt: str, user_prompt: str, max_tokens: int = 200) 
         'model': 'sonar-pro',
         'messages': [
             {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': user_prompt or 'Generate a promo tweet.'}
+            {'role': 'user', 'content': user_prompt or 'Generate a tweet.'}
         ],
         'max_tokens': max_tokens,
         'temperature': 1.0,
@@ -130,9 +129,7 @@ def fetch_dexscreener_data(addr: str) -> dict:
     out = {
         'symbol': token_info.get('symbol'),
         'price_usd': float(d.get('priceUsd', 0)),
-        'fdv_usd': float(d.get('fdv', 0)),
         'volume_usd': float(d.get('volume', {}).get('h24', 0)),
-        'liquidity_usd': float(d.get('liquidity', {}).get('usd', 0)),
         'market_cap': float(d.get('marketCap', 0)),
         'change_1h': float(d.get('priceChange', {}).get('h1', 0)),
         'change_24h': float(d.get('priceChange', {}).get('h24', 0)),
@@ -196,17 +193,26 @@ async def handle_mention(ev: dict):
             reply = ask_perplexity("Crypto details unavailable—one concise tweet.", txt, 80)
         else:
             d = fetch_dexscreener_data(addr)
-            lines = [
-                f"🚀 {d['symbol']} | ${d['price_usd']:.6f}",
-                f"MC ${d['market_cap']:.0f}K | Vol24 ${d['volume_usd']:.1f}K",
-                f"1h {'🟢' if d['change_1h']>=0 else '🔴'}{d['change_1h']:+.2f}% | 24h {'🟢' if d['change_24h']>=0 else '🔴'}{d['change_24h']:+.2f}%",
-            ]
-            if d.get('project_url'): lines.append(f"🌐 {d['project_url']}")
-            for soc_line in format_socials(d.get('socials', [])):
-                lines.append(soc_line)
-            lines.append(f"🔗 https://dexscreener.com/solana/{addr}")
-            if tok == 'DEGEN': lines += DEGEN_KB
-            reply = "\n".join(lines)
+            # Pure data-only if only token/address
+            if txt.strip() == q:
+                lines = [
+                    f"🚀 {d['symbol']} | ${d['price_usd']:,.6f}",
+                    f"MC ${d['market_cap']:,.0f}K | Vol24 ${d['volume_usd']:,.1f}K",
+                    f"1h {'🟢' if d['change_1h']>=0 else '🔴'}{d['change_1h']:+.2f}% | 24h {'🟢' if d['change_24h']>=0 else '🔴'}{d['change_24h']:+.2f}%",
+                ]
+                if d.get('project_url'): lines.append(f"🌐 {d['project_url']}")
+                for soc_line in format_socials(d.get('socials', [])):
+                    lines.append(soc_line)
+                lines.append(f"🔗 https://dexscreener.com/solana/{addr}")
+                if tok == 'DEGEN': lines += DEGEN_KB
+                reply = "\n".join(lines)
+            else:
+                # Conversational response using Perplexity
+                system = (
+                    f"Expert Solana meme coin analyst: given these metrics {json.dumps(d)}, "
+                    "craft a concise conversational reply (<240 chars) including insights on trends and sentiment." 
+                )
+                reply = ask_perplexity(system, txt, max_tokens=150)
         x_client.create_tweet(text=reply[:240], in_reply_to_tweet_id=int(tid))
         return {'message': 'ok'}
 
@@ -217,18 +223,17 @@ async def handle_mention(ev: dict):
     x_client.create_tweet(text=reply[:240], in_reply_to_tweet_id=int(tid))
     return {'message': 'ok'}
 
-# Dynamic hourly promo using Perplexity (4 sentences)
+# Dynamic hourly promo using Perplexity (4 sentences strictly about $DEGEN)
 async def degen_hourly_loop():
     while True:
         try:
             d = fetch_dexscreener_data(DEGEN_ADDR)
             system = (
-                "You are a dynamic promo copywriter for a Solana meme coin. Write exactly 4 sentences, positive, engaging, community-focused, "
-                f"using these metrics: price ${d['price_usd']:.6f}, market cap ${d['market_cap']:.0f}K, volume24 ${d['volume_usd']:.1f}K. "
-                "Return only the tweet text with no additional commentary."
+                "Dynamic promo copywriter: write exactly 4 sentences, positive, engaging, community-focused about $DEGEN on Solana, "
+                f"using metrics price ${d['price_usd']:,.6f}, market cap ${d['market_cap']:,.0f}K, volume24 ${d['volume_usd']:,.1f}K. "
+                "Mention contract address 6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f. Return only tweet text."
             )
-            user = ""
-            promo = ask_perplexity(system, user, max_tokens=200)
+            promo = ask_perplexity(system, "", max_tokens=200)
             x_client.create_tweet(text=promo[:240])
             logger.info("promo sent")
         except Exception as e:

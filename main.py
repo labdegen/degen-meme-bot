@@ -151,7 +151,7 @@ def resolve_token(q: str) -> tuple:
     except:
         return None, None
 
-async def handle_mention(ev: dict):"{soc['name']}: {soc['url']}" for soc in socials if soc.get('name') and soc.get('url')]
+('name') and soc.get('url')]
 
 async def handle_mention(ev: dict):
     txt = ev['tweet_create_events'][0]['text'].replace('@askdegen', '').strip()

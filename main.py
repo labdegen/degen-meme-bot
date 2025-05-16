@@ -135,12 +135,10 @@ def resolve_token(query: str) -> tuple:
         return 'DEGEN', DEGEN_ADDRESS
     if re.match(r'^[A-Za-z0-9]{43,44}$', q):
         return None, q
-    # Try DexScreener search
     sym, addr = search_dexscreener_symbol(q)
     if addr:
         return sym, addr
-    # Fallback Perplexity mapping
-    sys = 'Map a Solana token symbol to its contract address. Return JSON {"symbol":str,"address":str}.'
+    sys = 'Map a Solana token symbol to its contract address. Return JSON {"symbol":str,"address":str}.''
     out = ask_perplexity(sys, f"Symbol: {q}", max_tokens=100)
     try:
         obj = json.loads(out)
@@ -150,18 +148,15 @@ def resolve_token(query: str) -> tuple:
         pass
     return None, None
 
-# Handle a mention event
-async def handle_mention(data: dict):
+# Handle a mention event\async def handle_mention(data: dict):
     evt = data['tweet_create_events'][0]
     txt = evt.get('text','').replace('@askdegen','').strip()
     tid = evt.get('id_str')
 
     words = txt.split()
-    # Pure ticker/address query
     if len(words) == 1 and (words[0].startswith('$') or re.match(r'^[A-Za-z0-9]{43,44}$', words[0])):
         _, address = resolve_token(words[0])
         if not address:
-            # Fallback perplexity reply
             reply = ask_perplexity(
                 'Professional degen assistant: deliver data or admit inability in one concise tweet (<240 chars).',
                 txt,
@@ -169,7 +164,6 @@ async def handle_mention(data: dict):
             )
         else:
             d = fetch_dexscreener_data(address)
-            # Format with icons
             ts = time.localtime()
             date = time.strftime('%Y-%m-%d', ts)
             tm = time.strftime('%H:%M:%S', ts)
@@ -195,14 +189,20 @@ async def handle_mention(data: dict):
 # Hourly DEGEN promotional loop
 def compose_degen_promo():
     d = fetch_dexscreener_data(DEGEN_ADDRESS)
-    return (
+    base = (
         f"🚀 $DEGEN at ${d['price_usd']:.6f} | MC: ${d['market_cap']:.0f}K | "
         f"24h {'🟢' if d['change_24h']>=0 else '🔴'} {d['change_24h']:+.2f}%—great entry under ATH!"
     )
+    # Ensure minimum length of 240
+    filler = " Join the Degen community now to ride the next wave of growth and seize this opportunity before it spikes even higher!"
+    tweet = base
+    while len(tweet) < 240:
+        tweet += filler
+    return tweet[:240]
 
 async def degen_hourly_loop():
     while True:
-        tweet = compose_degen_promo()[:240]
+        tweet = compose_degen_promo()
         x_client.create_tweet(text=tweet)
         logger.info('Posted hourly DEGEN update')
         await asyncio.sleep(3600)

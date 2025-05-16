@@ -22,7 +22,7 @@ required_vars = [
     "X_API_KEY", "X_API_KEY_SECRET",
     "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET",
     "X_BEARER_TOKEN",
-    "GROK_API_KEY", "PERPLEXITY_API_KEY",
+    "GROK_API_KEY",
     "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"
 ]
 for v in required_vars:
@@ -86,9 +86,13 @@ def ask_grok(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str
         "Authorization": f"Bearer {GROK_KEY}",
         "Content-Type": "application/json"
     }
-    r = requests.post(GROK_URL, json=body, headers=headers, timeout=15)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"].strip()
+    try:
+        r = requests.post(GROK_URL, json=body, headers=headers, timeout=15)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.error(f"Grok fallback: {e}")
+        return "Insight currently unavailable. Check back soon."
 
 def fetch_data(addr: str) -> dict:
     cache_key = f"{REDIS_PREFIX}dex:{addr}"
@@ -152,7 +156,7 @@ async def handle_mention(ev: dict):
                 ]
                 reply = "\n".join(lines)
             else:
-                prompt = f"You are a professional analyst. Based on metrics {json.dumps(d)}, write a polished 240-character max tweet response to a crypto investor. End your thought clearly."
+                prompt = f"You are a professional crypto market analyst. Given: {json.dumps(d)}, reply to an investor in <240 characters. Be clear, insightful, and do not mention Solana."
                 reply = ask_grok(prompt, txt, max_tokens=160)
         else:
             reply = ask_grok("Professional analyst: reply under 240 characters clearly.", txt, max_tokens=160)
@@ -161,7 +165,11 @@ async def handle_mention(ev: dict):
 
     tweet = reply.strip()
     if len(tweet) > 240:
-        tweet = tweet[:240].rsplit('.', 1)[0] + '.'
+        tweet = tweet[:240]
+        if '.' in tweet:
+            tweet = tweet.rsplit('.', 1)[0] + '.'
+        else:
+            tweet = tweet.rsplit(' ', 1)[0] + '...'
     x_client.create_tweet(text=tweet, in_reply_to_tweet_id=int(tid))
     return {'message': 'ok'}
 
@@ -175,11 +183,15 @@ async def degen_hourly_loop():
                 f"1h {'🟢' if d['change_1h'] >= 0 else '🔴'}{d['change_1h']:+.2f}% | 24h {'🟢' if d['change_24h'] >= 0 else '🔴'}{d['change_24h']:+.2f}%",
                 d['link']
             ]
-            sys_msg = "You are a member of the DEGEN community. Based on the metrics, write a natural and human-sounding 2-3 sentence tweet update. End your thought."
-            analysis = ask_grok(sys_msg, '', max_tokens=180)
+            sys_msg = "You are a DEGEN community insider. Write a 2-sentence hourly update based on this data. Be enthusiastic but grounded. Do not mention Solana."
+            analysis = ask_grok(sys_msg, json.dumps(d), max_tokens=160)
             tweet = "\n".join(card + [analysis])
             if len(tweet) > 280:
-                tweet = tweet[:280].rsplit('.', 1)[0] + '.'
+                tweet = tweet[:280]
+                if '.' in tweet:
+                    tweet = tweet.rsplit('.', 1)[0] + '.'
+                else:
+                    tweet = tweet.rsplit(' ', 1)[0] + '...'
             try:
                 x_client.create_tweet(text=tweet)
                 logger.info("Hourly promo posted")

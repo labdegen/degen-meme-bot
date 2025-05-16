@@ -84,7 +84,15 @@ DEGEN_KB = [
 
 # Helpers
 def ask_grok(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str:
-    body = {"model": "grok-3", "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}], "max_tokens": max_tokens, "temperature": 0.7}
+    body = {
+        "model": "grok-3",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.7
+    }
     headers = {"Authorization": f"Bearer {grok_key}", "Content-Type": "application/json"}
     resp = requests.post(grok_url, json=body, headers=headers, timeout=15)
     resp.raise_for_status()
@@ -138,7 +146,6 @@ def resolve_token(q: str) -> tuple:
         return 'DEGEN', DEGEN_ADDR
     if ADDRESS_REGEX.match(s):
         return None, s
-    # Fallback: always use Solana search via DexScreener API
     try:
         resp = requests.get(f"https://api.dexscreener.com/latest/dex/search?search={s}", timeout=10)
         resp.raise_for_status()
@@ -149,10 +156,10 @@ def resolve_token(q: str) -> tuple:
                 return sym, addr
     except:
         pass
-    # Last fallback via Grok
     out = ask_grok(
         'Map a Solana token symbol to its contract address. Return JSON {"symbol":str,"address":str}.',
-        f"Symbol: {s}", 100
+        f"Symbol: {s}",
+        100
     )
     try:
         j = json.loads(out)
@@ -178,9 +185,6 @@ async def handle_mention(ev: dict):
                 if d['project_url']:
                     lines.append(f"🌐 {d['project_url']}")
                 lines += format_socials(d['socials'])
-                lines.append(f"🔗 https://dexscreener.com/solana/{addr}")
-                if tok == 'DEGEN':
-                    lines += DEGEN_KB
                 reply = '\n'.join(lines)
             else:
                 system = f"Expert Solana meme coin analyst: given these metrics {json.dumps(d)}, craft a concise (<240 chars) conversational reply."
@@ -204,9 +208,9 @@ async def degen_hourly_loop():
             system = (
                 "Dynamic promo copywriter: write exactly 4 sentences that are positive, engaging, and community-focused about $DEGEN on Solana, "
                 f"using the latest metrics: price=${d['price_usd']:,.6f}, market cap=${d['market_cap']:,.0f}K, 24h volume=${d['volume_usd']:,.1f}K." 
-                "Return only the tweet text, up to 280 characters."
+                "Return only the tweet text, up to 280 characters."  
             )
-            promo = ask_perplexity(system, "", max_tokens=180)
+            promo = ask_perplexity(system, "", max_tokens=200)
             x_client.create_tweet(text=promo.strip()[:280])
             logger.info("Hourly promo sent successfully.")
         except Exception as e:
@@ -226,3 +230,22 @@ async def poll_loop():
                     await handle_mention(ev)
                 except Exception as e:
                     logger.error(f"handle_mention error: {e}")
+                redis_client.set(f"{REDIS_PREFIX}last_tweet_id", tw.id)
+                redis_client.set(f"{REDIS_PREFIX}last_mention", int(time.time()))
+        lm = redis_client.get(f"{REDIS_PREFIX}last_mention")
+        await asyncio.sleep(90 if lm and time.time()-int(lm)<3600 else 1800)
+
+@app.on_event('startup')
+async def on_startup():
+    asyncio.create_task(poll_loop())
+    asyncio.create_task(degen_hourly_loop())
+
+@app.get('/')
+async def root():
+    return {'message':'Degen Meme Bot is live.'}
+
+@app.post('/test')
+async def test_bot(request: Request):
+    body = await request.json()
+    ev = {'tweet_create_events':[{'id_str':'0','text':body.get('text',''),'user':{'screen_name':'test'}}]}
+    return await handle_mention(ev)

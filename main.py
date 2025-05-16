@@ -160,7 +160,7 @@ async def degen_hourly_loop():
             d = fetch_dexscreener_data(DEGEN_ADDR)
             system = ("Dynamic promo copywriter: write positive, engaging, community-focused about $DEGEN on Solana, "
                       f"using metrics price ${d['price_usd']:,.6f}, market cap ${d['market_cap']:,.0f}K, volume24 ${d['volume_usd']:,.1f}K. "
-                      "Return only tweet text up to 280 characters. Must complete the phrase within the 280 character limit.")
+                      "Mention contract address 6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f. Return only tweet text up to 280 characters. Must complete the phrase within the 280 character limit.")
             promo = ask_perplexity(system, "", max_tokens=180)
             x_client.create_tweet(text=promo[:280]); logger.info("promo sent")
         except Exception as e:

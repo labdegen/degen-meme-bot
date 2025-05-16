@@ -138,8 +138,8 @@ def resolve_token(query: str) -> tuple:
     sym, addr = search_dexscreener_symbol(q)
     if addr:
         return sym, addr
-    sys = 'Map a Solana token symbol to its contract address. Return JSON {"symbol":str,"address":str}.''
-    out = ask_perplexity(sys, f"Symbol: {q}", max_tokens=100)
+    system = 'Map a Solana token symbol to its contract address. Return JSON {"symbol":str,"address":str}.'
+    out = ask_perplexity(system, f"Symbol: {q}", max_tokens=100)
     try:
         obj = json.loads(out)
         if obj.get('address'):
@@ -148,12 +148,14 @@ def resolve_token(query: str) -> tuple:
         pass
     return None, None
 
-# Handle a mention event\async def handle_mention(data: dict):
+# Handle a mention event
+async def handle_mention(data: dict):
     evt = data['tweet_create_events'][0]
     txt = evt.get('text','').replace('@askdegen','').strip()
     tid = evt.get('id_str')
 
     words = txt.split()
+    # Pure ticker/address query
     if len(words) == 1 and (words[0].startswith('$') or re.match(r'^[A-Za-z0-9]{43,44}$', words[0])):
         _, address = resolve_token(words[0])
         if not address:
@@ -193,7 +195,7 @@ def compose_degen_promo():
         f"🚀 $DEGEN at ${d['price_usd']:.6f} | MC: ${d['market_cap']:.0f}K | "
         f"24h {'🟢' if d['change_24h']>=0 else '🔴'} {d['change_24h']:+.2f}%—great entry under ATH!"
     )
-    # Ensure minimum length of 240
+    # Ensure minimum length of 240 chars
     filler = " Join the Degen community now to ride the next wave of growth and seize this opportunity before it spikes even higher!"
     tweet = base
     while len(tweet) < 240:
@@ -207,8 +209,7 @@ async def degen_hourly_loop():
         logger.info('Posted hourly DEGEN update')
         await asyncio.sleep(3600)
 
-# Polling loop & startup
-async def poll_mentions():
+# Polling loop & startup\async def poll_mentions():
     last = redis_client.get(f"{REDIS_CACHE_PREFIX}last_tweet_id")
     since = int(last) if last else None
     res = x_client.get_users_mentions(

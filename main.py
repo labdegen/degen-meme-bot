@@ -121,6 +121,38 @@ def fetch_dexscreener_data(addr: str) -> dict:
 def format_socials(socials: list) -> list:
     return [f"{soc['name']}: {soc['url']}" for soc in socials if soc.get('name') and soc.get('url')]
 
+# Token resolution helper (symbol -> address)
+def resolve_token(q: str) -> tuple:
+    s = q.upper().lstrip('$')
+    if s == 'DEGEN':
+        return 'DEGEN', DEGEN_ADDR
+    if ADDRESS_REGEX.match(s):
+        return None, s
+    # Fallback: always use Solana search via dexscreener API
+    try:
+        resp = requests.get(f"https://api.dexscreener.com/latest/dex/search?search={s}", timeout=10)
+        resp.raise_for_status()
+        for item in resp.json():
+            if item.get('chainId') == 'solana':
+                sym = item.get('baseToken', {}).get('symbol')
+                addr = item.get('pairAddress') or item.get('baseToken', {}).get('address')
+                return sym, addr
+    except:
+        pass
+    # Last fallback via Grok
+    out = ask_grok(
+        'Map a Solana token symbol to its contract address. Return JSON {"symbol":str,"address":str}.',
+        f"Symbol: {s}",
+        100
+    )
+    try:
+        j = json.loads(out)
+        return j.get('symbol'), j.get('address')
+    except:
+        return None, None
+
+async def handle_mention(ev: dict):"{soc['name']}: {soc['url']}" for soc in socials if soc.get('name') and soc.get('url')]
+
 async def handle_mention(ev: dict):
     txt = ev['tweet_create_events'][0]['text'].replace('@askdegen', '').strip()
     tid = ev['tweet_create_events'][0]['id_str']

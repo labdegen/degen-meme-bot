@@ -236,7 +236,7 @@ TEMPLATES = [
     "🎉 $DEGEN now ${price:.6f}, MC ${mcap:.0f}K—solid retention and community growth. @ogdegenonsol"
 ]
 
-def compose_promo() -> str:
+ def compose_promo() -> str:
     idx = int(redis_client.get(PROMO_IDX) or 0) % len(TEMPLATES)
     redis_client.set(PROMO_IDX, (idx + 1) % len(TEMPLATES))
     d = fetch_dexscreener_data(DEGEN_ADDR)
@@ -272,7 +272,7 @@ async def poll_mentions():
         except Exception as e:
             logger.error(e)
         redis_client.set(f"{REDIS_PREFIX}last_tweet_id", tw.id)
-        redis_client.set(f"{REDIM_PREFIX}last_mention", int(time.time()))
+        redis_client.set(f"{REDIS_PREFIX}last_mention", int(time.time()))
 
 async def poll_loop():
     while True:

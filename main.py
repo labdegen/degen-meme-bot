@@ -74,6 +74,7 @@ logger.info(f"Authenticated as: {token_data.username}, ID: {ASKDEGEN_ID}")
 # Constants
 REDIS_PREFIX = "degen:"
 DEGEN_ADDR = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
+ADDRESS_REGEX = re.compile(r'^[A-Za-z0-9]{43,44}$')
 
 # Knowledge base for $DEGEN
 DEGEN_KB = [
@@ -159,7 +160,7 @@ def search_symbol(sym: str) -> tuple:
 def resolve_token(q: str) -> tuple:
     s = q.upper().lstrip('$')
     if s == 'DEGEN': return 'DEGEN', DEGEN_ADDR
-    if re.match(r'^[A-Za-z0-9]{43,44}$', s): return None, s
+    if ADDRESS_REGEX.match(s): return None, s
     sym, addr = search_symbol(s)
     if addr: return sym, addr
     out = ask_grok(
@@ -185,14 +186,14 @@ def format_socials(socials: list) -> list:
 async def handle_mention(ev: dict):
     txt = ev['tweet_create_events'][0]['text'].replace('@askdegen', '').strip()
     tid = ev['tweet_create_events'][0]['id_str']
-    words = txt.split()
+    tokens = [w for w in txt.split() if w.startswith('$') or ADDRESS_REGEX.match(w)]
 
-    if len(words) == 1 and (words[0].startswith('$') or re.match(r'^[A-Za-z0-9]{43,44}$', words[0])):
-        tok, addr = resolve_token(words[0])
+    # Crypto queries
+    if tokens:
+        q = tokens[0]
+        tok, addr = resolve_token(q)
         if not addr:
-            reply = ask_perplexity(
-                "Crypto data unavailable—one concise tweet.", txt, 80
-            )
+            reply = ask_perplexity("Crypto details unavailable—one concise tweet.", txt, 80)
         else:
             d = fetch_dexscreener_data(addr)
             lines = [
@@ -209,22 +210,24 @@ async def handle_mention(ev: dict):
         x_client.create_tweet(text=reply[:240], in_reply_to_tweet_id=int(tid))
         return {'message': 'ok'}
 
+    # Non-crypto queries
     reply = ask_grok(
         "Answer as Tim Dillon: witty, direct, one tweet (<240 chars).", txt, 120
     )
     x_client.create_tweet(text=reply[:240], in_reply_to_tweet_id=int(tid))
     return {'message': 'ok'}
 
-# Dynamic hourly promo using Perplexity
+# Dynamic hourly promo using Perplexity (4 sentences)
 async def degen_hourly_loop():
     while True:
         try:
             d = fetch_dexscreener_data(DEGEN_ADDR)
             system = (
-                "Dynamic promo copywriter: craft a positive, engaging, Solana community–focused promotional tweet of exactly 4 sentences for $DEGEN, "
-                f"using these up-to-the-minute metrics: price ${d['price_usd']:.6f}, market cap ${d['market_cap']:.0f}K, volume24 ${d['volume_usd']:.1f}K."
+                "You are a dynamic promo copywriter for a Solana meme coin. Write exactly 4 sentences, positive, engaging, community-focused, "
+                f"using these metrics: price ${d['price_usd']:.6f}, market cap ${d['market_cap']:.0f}K, volume24 ${d['volume_usd']:.1f}K. "
+                "Return only the tweet text with no additional commentary."
             )
-            user = "Generate tweet limited to 240 characters."
+            user = ""
             promo = ask_perplexity(system, user, max_tokens=200)
             x_client.create_tweet(text=promo[:240])
             logger.info("promo sent")
@@ -237,7 +240,8 @@ async def poll_mentions():
     since = int(last) if last else None
     res = x_client.get_users_mentions(
         id=ASKDEGEN_ID, since_id=since,
-        tweet_fields=['id','text','author_id'], expansions=['author_id'], user_fields=['username'], max_results=10
+        tweet_fields=['id','text','author_id'],
+        expansions=['author_id'], user_fields=['username'], max_results=10
     )
     if not res or not res.data: return
     users = {u.id: u.username for u in res.includes.get('users', [])}

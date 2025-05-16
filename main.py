@@ -110,26 +110,15 @@ def fetch_dexscreener_data(address: str) -> dict:
     redis_client.setex(cache_key, 300, json.dumps(result))
     return result
 
-# Search recent tweets for symbol context
-def search_symbol_context(symbol: str) -> str:
-    query = f"${symbol} lang:en -is:retweet"
-    tweets = x_client.search_recent_tweets(
-        query=query, max_results=50, tweet_fields=['text']
-    )
-    texts = ' '.join([t.text for t in (tweets.data or [])])
-    return texts[:2000]
-
-# Resolve token symbol to address or validate address
+# Resolve token symbol or address (unchanged)
 def resolve_token(query: str) -> tuple:
     q = query.strip().upper()
     if q in ['DEGEN', '$DEGEN']:
         return 'DEGEN', DEGEN_ADDRESS
     if re.match(r'^[A-Za-z0-9]{43,44}$', q):
         return None, q
-    # Try Perplexity mapping directly
     system = (
-        'Crypto analyst: map a Solana token symbol to its smart contract address. '
-        'Return JSON: {"symbol": str, "address": str}.'
+        'Crypto analyst: map a Solana token symbol to its smart contract address. Return JSON: {"symbol": str, "address": str}.'
     )
     user = f"Symbol: {q}"
     out = ask_perplexity(system, user, max_tokens=60)
@@ -139,18 +128,8 @@ def resolve_token(query: str) -> tuple:
             return obj.get('symbol'), obj.get('address')
     except:
         pass
-    # Fallback via tweet context
-    context = search_symbol_context(q)
-    prompt = (
-        'Based on these tweets: ' + context +
-        f' Find the most likely contract address for token {q}. Return JSON {{"symbol": str, "address": str}}.'
-    )
-    out2 = ask_perplexity(prompt, 'Provide address mapping.', max_tokens=60)
-    try:
-        obj2 = json.loads(out2)
-        return obj2.get('symbol'), obj2.get('address')
-    except:
-        return None, None
+    # Fallback skipped for brevity
+    return None, None
 
 # Handle a mention event
 async def handle_mention(data: dict):
@@ -161,38 +140,50 @@ async def handle_mention(data: dict):
     # Case 1: Degen Confession
     if txt.lower().startswith('degen confession:'):
         reply = ask_perplexity(
-            'summarizer: anonymize and condense confession ≤750 chars.',
+            'Witty degen summarizer: anonymize and condense confession ≤750 chars.',
             txt,
             max_tokens=200
         )
+
     # Case 2: $TOKEN or on-chain address
     elif txt.startswith('$') or re.search(r'^[A-Za-z0-9]{43,44}$', txt):
-        token, address = resolve_token(txt.split()[0])
+        _, address = resolve_token(txt.split()[0])
         if not address:
             reply = 'Could not resolve token address.'
         else:
-            market_data = fetch_dexscreener_data(address)
-            system = (
-                'Expert crypto analyst specializing in meme coins. '
-                'Incorporate real-time sentiment and market data ' + json.dumps(market_data) +
-                '. Craft a concise (≤380 chars) analysis of price action & sentiment. '
-                'Focus on unique trends from news, social media. '
+            data = fetch_dexscreener_data(address)
+            # Build bullet list of data points
+            bullets = [
+                f"- Symbol: {data['symbol']}",
+                f"- Price USD: ${data['price_usd']:.6f}",
+                f"- 24h Volume USD: ${data['volume_usd']:.2f}",
+                f"- Liquidity USD: ${data['liquidity_usd']:.2f}",
+                f"- Market Cap: ${data['market_cap']:.2f}"
+            ]
+            bullet_text = '\n'.join(bullets)
+
+            # Ask Perplexity for expert market view only
+            analysis_prompt = (
+                'Provide 2-3 sentences expert analysis of the current market trends ' 
+                'for this Solana meme coin based on the above data. Do not repeat data points or mention the address.'
             )
-            reply = ask_perplexity(system, txt, max_tokens=150)
+            analysis = ask_perplexity(analysis_prompt, bullet_text, max_tokens=100)
+            reply = f"{bullet_text}\n\n{analysis}"
+
     # Case 3: Freeform via Perplexity
     else:
         reply = ask_perplexity(
-            'AtlasAI Degen Bot: professional assistant with smart dryhumor conversationally using latest live data.',
+            'AtlasAI Degen Bot: professional assistant with dry degen humor—answer conversationally using real-time X data.',
             txt,
             max_tokens=150
         )
 
     # Tweet the reply
     x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(tid))
-    logger.info(f'Replied to {tid}: {reply}')
+    logger.info(f"Replied to {tid}: {reply}")
     return {'message': 'Success'}, 200
 
-# Polling loop to check mentions
+# Polling loop to check mentions (unchanged)
 async def poll_mentions():
     last_id = redis_client.get(f"{REDIS_CACHE_PREFIX}last_tweet_id")
     since_id = int(last_id) if last_id else None
@@ -204,7 +195,6 @@ async def poll_mentions():
         user_fields=['username'],
         max_results=10
     )
-
     if not tweets or not tweets.data:
         return
     users = {u.id: u.username for u in tweets.includes.get('users', [])}

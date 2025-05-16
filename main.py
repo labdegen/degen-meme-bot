@@ -63,6 +63,7 @@ logger.info("Redis connected")
 PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
 PERPLEXITY_API_KEY = os.getenv("PERPLEXITY_API_KEY")
 DEXSCREENER_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
+DEX_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search?search={}"
 REDIS_CACHE_PREFIX = "degen:"
 DEGEN_ADDRESS = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
 
@@ -102,21 +103,43 @@ def fetch_dexscreener_data(address: str) -> dict:
     result = {
         'symbol': data['baseToken']['symbol'],
         'price_usd': float(data.get('priceUsd', 0)),
-        'liquidity_usd': float(data.get('liquidity', {}).get('usd', 0)),
+        'fdv_usd': float(data.get('fdv', 0)),
         'volume_usd': float(data.get('volume', {}).get('h24', 0)),
-        'market_cap': float(data.get('marketCap', 0))
+        'liquidity_usd': float(data.get('liquidity', {}).get('usd', 0)),
+        'market_cap': float(data.get('marketCap', 0)),
+        'change_1h': float(data.get('priceChange', {}).get('h1', 0)),
+        'change_6h': float(data.get('priceChange', {}).get('h6', 0)),
+        'change_24h': float(data.get('priceChange', {}).get('h24', 0))
     }
     redis_client.setex(cache_key, 300, json.dumps(result))
     return result
 
+# Search DexScreener by ticker symbol
+def search_dexscreener_symbol(symbol: str) -> tuple:
+    try:
+        resp = requests.get(DEX_SEARCH_URL.format(symbol), timeout=10)
+        resp.raise_for_status()
+        items = resp.json()
+        for item in items:
+            if item.get('chainId') == 'solana':
+                addr = item.get('pairAddress') or item.get('baseToken', {}).get('address')
+                return item.get('baseToken', {}).get('symbol'), addr
+    except:
+        pass
+    return None, None
+
 # Resolve token symbol or address
 def resolve_token(query: str) -> tuple:
-    q = query.strip().upper()
-    if q in ['DEGEN', '$DEGEN']:
+    q = query.strip().upper().lstrip('$')
+    if q == 'DEGEN':
         return 'DEGEN', DEGEN_ADDRESS
     if re.match(r'^[A-Za-z0-9]{43,44}$', q):
         return None, q
-    # Try direct Perplexity mapping
+    # Try DexScreener search
+    sym, addr = search_dexscreener_symbol(q)
+    if addr:
+        return sym, addr
+    # Fallback Perplexity mapping
     sys = 'Map a Solana token symbol to its contract address. Return JSON {"symbol":str,"address":str}.'
     out = ask_perplexity(sys, f"Symbol: {q}", max_tokens=100)
     try:
@@ -133,52 +156,58 @@ async def handle_mention(data: dict):
     txt = evt.get('text','').replace('@askdegen','').strip()
     tid = evt.get('id_str')
 
-    # If pure token/address query
     words = txt.split()
-    is_symbol = len(words)==1 and (words[0].startswith('$') or re.match(r'^[A-Za-z0-9]{43,44}$',words[0]))
-    if is_symbol:
+    # Pure ticker/address query
+    if len(words) == 1 and (words[0].startswith('$') or re.match(r'^[A-Za-z0-9]{43,44}$', words[0])):
         _, address = resolve_token(words[0])
         if not address:
-            reply = 'Could not resolve token address.'
+            # Fallback perplexity reply
+            reply = ask_perplexity(
+                'Professional degen assistant: deliver data or admit inability in one concise tweet (<240 chars).',
+                txt,
+                max_tokens=80
+            )
         else:
             d = fetch_dexscreener_data(address)
+            # Format with icons
+            ts = time.localtime()
+            date = time.strftime('%Y-%m-%d', ts)
+            tm = time.strftime('%H:%M:%S', ts)
             reply = (
-                f"{d['symbol']} | Price: ${d['price_usd']:.6f} | "
-                f"24h Vol: ${d['volume_usd']:.2f} | Liquidity: ${d['liquidity_usd']:.2f} | "
-                f"MC: ${d['market_cap']:.2f}"
-                f"\n🔗 https://dexscreener.com/solana/{address}"
+                f"🚀 {d['symbol']} | 💲 ${d['price_usd']:.6f} | MC: ${d['market_cap']:.0f}K\n"
+                f"📈 24h Vol: ${d['volume_usd']:.1f}K | FDV: ${d['fdv_usd']:.1f}K\n"
+                f"⏱ 1h {'🟢' if d['change_1h']>=0 else '🔴'} {d['change_1h']:+.2f}% | 24h {'🟢' if d['change_24h']>=0 else '🔴'} {d['change_24h']:+.2f}%\n"
+                f"📅 {date} | 🕒 {tm}\n"
+                f"🔗 https://dexscreener.com/solana/{address}"
             )
-        # single tweet
-        x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(tid))
+        x_client.create_tweet(text=reply[:240], in_reply_to_tweet_id=int(tid))
         return {'message':'Success'},200
 
     # Other queries -> Perplexity
     reply = ask_perplexity(
-        'Professional degen assistant: answer concisely in one tweet (<280 chars).',
+        'Professional degen assistant: answer concisely in one tweet (<240 chars).',
         txt,
         max_tokens=120
     )
-    x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(tid))
+    x_client.create_tweet(text=reply[:240], in_reply_to_tweet_id=int(tid))
     return {'message':'Success'},200
 
 # Hourly DEGEN promotional loop
+def compose_degen_promo():
+    d = fetch_dexscreener_data(DEGEN_ADDRESS)
+    return (
+        f"🚀 $DEGEN at ${d['price_usd']:.6f} | MC: ${d['market_cap']:.0f}K | "
+        f"24h {'🟢' if d['change_24h']>=0 else '🔴'} {d['change_24h']:+.2f}%—great entry under ATH!"
+    )
+
 async def degen_hourly_loop():
     while True:
-        d = fetch_dexscreener_data(DEGEN_ADDRESS)
-        tweet = (
-            f"${d['symbol']} is trading at ${d['price_usd']:.6f} with a market cap of ${d['market_cap']:.2f}. "
-            f"Upbeat momentum in Solana meme space—now's a prime entry under ATH!"
-        )
+        tweet = compose_degen_promo()[:240]
         x_client.create_tweet(text=tweet)
         logger.info('Posted hourly DEGEN update')
         await asyncio.sleep(3600)
 
-@app.on_event('startup')
-async def startup_event():
-    asyncio.create_task(poll_mentions_loop())
-    asyncio.create_task(degen_hourly_loop())
-
-# Polling loop (unchanged)
+# Polling loop & startup
 async def poll_mentions():
     last = redis_client.get(f"{REDIS_CACHE_PREFIX}last_tweet_id")
     since = int(last) if last else None
@@ -201,11 +230,20 @@ async def poll_mentions():
 async def poll_mentions_loop():
     while True:
         await poll_mentions()
-        lm=redis_client.get(f"{REDIS_CACHE_PREFIX}last_mention")
+        lm = redis_client.get(f"{REDIS_CACHE_PREFIX}last_mention")
         interval = 90 if lm and time.time()-int(lm)<3600 else 1800
         await asyncio.sleep(interval)
+
+@app.on_event('startup')
+async def startup_event():
+    asyncio.create_task(poll_mentions_loop())
+    asyncio.create_task(degen_hourly_loop())
 
 @app.get('/')
 async def root(): return {'message':'Degen Meme Bot is live.'}
 @app.post('/test')
-async def test_bot(r:Request): body=await r.json();txt=body.get('text','');evt={'tweet_create_events':[{'id_str':'0','text':txt,'user':{'screen_name':'test'}}]};return await handle_mention(evt)
+async def test_bot(r: Request):
+    body = await r.json()
+    txt = body.get('text','')
+    evt = {'tweet_create_events':[{'id_str':'0','text':txt,'user':{'screen_name':'test'}}]}
+    return await handle_mention(evt)

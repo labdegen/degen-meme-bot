@@ -106,7 +106,7 @@ def ask_perplexity(system_prompt: str, user_prompt: str, max_tokens: int = 200) 
         'model': 'sonar-pro',
         'messages': [
             {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': user_prompt}
+            {'role': 'user', 'content': user_prompt or 'Generate a promo tweet.'}
         ],
         'max_tokens': max_tokens,
         'temperature': 1.0,

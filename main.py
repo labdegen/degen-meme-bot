@@ -40,7 +40,6 @@ bearer_token = os.getenv("X_BEARER_TOKEN")
 grok_url = "https://api.x.ai/v1/chat/completions"
 perplexity_url = "https://api.perplexity.ai/chat/completions"
 DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
-DEX_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search?search={}"
 
 # API keys
 grok_key = os.getenv("GROK_API_KEY")
@@ -92,7 +91,7 @@ def ask_grok(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str
     return resp.json()["choices"][0]["message"]["content"].strip()
 
 def ask_perplexity(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str:
-    payload = {'model': 'sonar-pro', 'messages': [{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': user_prompt or 'Generate a promo tweet.'}], 'max_tokens': max_tokens, 'temperature': 1.0, 'top_p': 0.9, 'search_recency_filter': 'week'}
+    payload = {'model': 'sonar-pro', 'messages': [{'role': 'system', 'content': system_prompt}, {'role': 'user', 'content': user_prompt or ''}], 'max_tokens': max_tokens, 'temperature': 1.0, 'top_p': 0.9, 'search_recency_filter': 'week'}
     headers = {'Authorization': f'Bearer {perplexity_key}', 'Content-Type': 'application/json'}
     resp = requests.post(perplexity_url, json=payload, headers=headers, timeout=60)
     resp.raise_for_status()
@@ -113,38 +112,11 @@ def fetch_dexscreener_data(addr: str) -> dict:
         'market_cap': float(d.get('marketCap', 0)),
         'change_1h': float(d.get('priceChange', {}).get('h1', 0)),
         'change_24h': float(d.get('priceChange', {}).get('h24', 0)),
-        'project_url': t.get('projectUrl'),
+        'project_url': t.get('projectUrl') or '',
         'socials': t.get('socials', [])
     }
     redis_client.setex(cache_key, 300, json.dumps(out))
     return out
-
-def resolve_token(q: str) -> tuple:
-    s = q.upper().lstrip('$')
-    if s == 'DEGEN':
-        return 'DEGEN', DEGEN_ADDR
-    if ADDRESS_REGEX.match(s):
-        return None, s
-    # fallback via dex search
-    sym, addr = None, None
-    try:
-        resp = requests.get(DEX_SEARCH_URL.format(s), timeout=10); resp.raise_for_status()
-        for item in resp.json():
-            if item.get('chainId') == 'solana':
-                sym = item.get('baseToken', {}).get('symbol')
-                addr = item.get('pairAddress') or item.get('baseToken', {}).get('address')
-                break
-    except:
-        pass
-    if addr:
-        return sym, addr
-    # last fallback via grok
-    out = ask_grok('Map a Solana token symbol to its address. Return JSON {"symbol":str,"address":str}.', f"Symbol: {s}", 100)
-    try:
-        j = json.loads(out)
-        return j.get('symbol'), j.get('address')
-    except:
-        return None, None
 
 def format_socials(socials: list) -> list:
     return [f"{soc['name']}: {soc['url']}" for soc in socials if soc.get('name') and soc.get('url')]
@@ -164,15 +136,14 @@ async def handle_mention(ev: dict):
                     f"MC ${d['market_cap']:,.0f}K | Vol24 ${d['volume_usd']:,.1f}K",
                     f"1h {'🟢' if d['change_1h']>=0 else '🔴'}{d['change_1h']:+.2f}% | 24h {'🟢' if d['change_24h']>=0 else '🔴'}{d['change_24h']:+.2f}%"
                 ]
-                if d.get('project_url'):
+                if d['project_url']:
                     lines.append(f"🌐 {d['project_url']}")
                 lines += format_socials(d['socials'])
                 lines.append(f"🔗 https://dexscreener.com/solana/{addr}")
-                if tok == 'DEGEN':
-                    lines += DEGEN_KB
+                if tok == 'DEGEN': lines += DEGEN_KB
                 reply = '\n'.join(lines)
             else:
-                system = f"Expert Solana meme coin analyst: given these metrics {json.dumps(d)}, craft a concise (<240 chars) conversational reply on trends and sentiment."
+                system = f"Expert Solana meme coin analyst: given these metrics {json.dumps(d)}, craft a concise (<240 chars) conversational reply."
                 reply = ask_perplexity(system, txt, max_tokens=150)
         else:
             reply = ask_perplexity("Crypto details unavailable—one concise tweet.", txt, max_tokens=80)
@@ -184,13 +155,11 @@ async def handle_mention(ev: dict):
 async def degen_hourly_loop():
     while True:
         try:
-            # Always fetch Solana contract data
-            logger.info(f"Fetching promo data for Solana $DEGEN {DEGEN_ADDR}")
+            # Always use Solana DEGEN_ADDR
             d = fetch_dexscreener_data(DEGEN_ADDR)
             system = (
                 "Write exactly 4 sentences: positive, engaging, community-focused tweet about $DEGEN on Solana, "
-                f"using metrics price ${d['price_usd']:,.6f}, market cap ${d['market_cap']:,.0f}K, vol24 ${d['volume_usd']:,.1f}K. "
-                "Return only text up to 280 chars."
+                f"using price ${d['price_usd']:,.6f}, MC ${d['market_cap']:,.0f}K, Vol24 ${d['volume_usd']:,.1f}K."
             )
             promo = ask_perplexity(system, "", max_tokens=200)
             x_client.create_tweet(text=promo[:280])
@@ -208,10 +177,8 @@ async def poll_loop():
             users = {u.id: u.username for u in res.includes.get('users', [])}
             for tw in reversed(res.data):
                 ev = {'tweet_create_events':[{'id_str':str(tw.id),'text':tw.text,'user':{'screen_name':users.get(tw.author_id,'?')}}]}
-                try:
-                    await handle_mention(ev)
-                except Exception as e:
-                    logger.error(f"handle_mention error: {e}")
+                try: await handle_mention(ev)
+                except Exception as e: logger.error(f"handle_mention error: {e}")
                 redis_client.set(f"{REDIS_PREFIX}last_tweet_id", tw.id)
                 redis_client.set(f"{REDIS_PREFIX}last_mention", int(time.time()))
         lm = redis_client.get(f"{REDIS_PREFIX}last_mention")

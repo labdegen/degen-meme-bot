@@ -216,10 +216,10 @@ async def hourly_post_loop():
         try:
             d = fetch_data(DEGEN_ADDR)
             card = format_metrics(d)
-            context = ask_grok("You're a Degen community member summarizing recent metrics. Make it casual, grounded, and complete within 2 sentences.", json.dumps(d), max_tokens=160)
+            context = ask_grok("You're a Degen community member summarizing recent metrics. Make it casual, grounded, and complete within 1 sentence.", json.dumps(d), max_tokens=160)
             tweet = f"{card}\n{context}"
-            if len(tweet) > 280:
-                tweet = tweet[:280].rsplit('.', 1)[0] + '.'
+            if len(tweet) > 380:
+                tweet = tweet[:380].rsplit('.', 1)[0] + '.'
             x_client.create_tweet(text=tweet)
             logger.info("Hourly promo posted")
         except Exception as e:

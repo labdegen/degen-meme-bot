@@ -169,7 +169,7 @@ def resolve_token(q: str) -> tuple:
     if not q:
         return None, None
         
-    s = q.upper().lstrip('
+    s = q.upper().lstrip('$')
 
 def format_token_data(d: dict) -> str:
     """Format token data into a Twitter-friendly message"""

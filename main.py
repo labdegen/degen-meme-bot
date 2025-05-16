@@ -147,14 +147,14 @@ async def handle_mention(data: dict):
             market_data = fetch_dexscreener_data(address)
             system = (
                 "Dry crypto gambler analyst. Given market data "
-                f"{json.dumps(market_data)}, craft a concise (≤280 chars) degen‐toned tweet about price action & sentiment."
+                f"{json.dumps(market_data)}, craft a concise (≤480 chars) tweet about price action & real-time data sentiment from X. Include specific up to the minute price and volume data where applicable from dexscreener. Look at live X data to talk about the latest trends and movements in memecoins. Avoid talking about popular coins like DOGE, SHIB or PEPE.  Focus on real-time data from X on what is trending with large solana associated account.  Do not be general.  Be very specific in the response and bring insights nobody would think of unless they had access to a huge real-time dataset from X."
             )
             reply = ask_grok(system, txt, max_tokens=150)
 
     # Case 3: Freeform via Grok
     else:
         reply = ask_grok(
-            "AtlasAI Degen Bot: professional assistant with dry degen humor—answer conversationally.",
+            "AtlasAI Degen Bot: professional assistant with dry degen vibes—answer conversationally. Professional and not over the top.",
             txt,
             max_tokens=150
         )

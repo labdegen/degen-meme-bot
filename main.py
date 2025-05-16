@@ -95,7 +95,7 @@ def ask_grok(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str
         return r.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
         logger.error(f"Grok fallback: {e}")
-        return "$DEGEN coded"
+        return "Insight currently unavailable. Check back soon."
 
 def ask_perplexity(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str:
     payload = {
@@ -216,10 +216,10 @@ async def hourly_post_loop():
         try:
             d = fetch_data(DEGEN_ADDR)
             card = format_metrics(d)
-            context = ask_grok("You're a Degen community member summarizing recent metrics. Make it casual, grounded, and complete within 1 sentence.", json.dumps(d), max_tokens=160)
+            context = ask_grok("You're a Degen community member summarizing recent metrics. Make it casual, grounded, and complete within 2 sentences.", json.dumps(d), max_tokens=160)
             tweet = f"{card}\n{context}"
-            if len(tweet) > 380:
-                tweet = tweet[:380].rsplit('.', 1)[0] + '.'
+            if len(tweet) > 280:
+                tweet = tweet[:280].rsplit('.', 1)[0] + '.'
             x_client.create_tweet(text=tweet)
             logger.info("Hourly promo posted")
         except Exception as e:

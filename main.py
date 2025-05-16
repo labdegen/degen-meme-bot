@@ -200,21 +200,38 @@ async def degen_hourly_loop():
     """
     Every hour, fetch fresh Solana $DEGEN metrics and post a 4-sentence promo tweet.
     Always uses the Solana contract address DEGEN_ADDR.
+    Falls back to simple metrics if Perplexity fails.
     """
     while True:
         try:
             logger.info(f"Fetching Solana $DEGEN metrics for promo: {DEGEN_ADDR}")
             d = fetch_dexscreener_data(DEGEN_ADDR)
+            # Attempt dynamic promo via Perplexity
             system = (
                 "Dynamic promo copywriter: write exactly 4 sentences that are positive, engaging, and community-focused about $DEGEN on Solana, "
                 f"using the latest metrics: price=${d['price_usd']:,.6f}, market cap=${d['market_cap']:,.0f}K, 24h volume=${d['volume_usd']:,.1f}K." 
-                "Return only the tweet text, up to 280 characters."  
+                "Return only the tweet text, up to 280 characters."
             )
-            promo = ask_perplexity(system, "", max_tokens=200)
-            x_client.create_tweet(text=promo.strip()[:280])
-            logger.info("Hourly promo sent successfully.")
+            try:
+                promo = ask_perplexity(system, "", max_tokens=200).strip()[:280]
+            except requests.exceptions.HTTPError as pe:
+                logger.error(f"Perplexity HTTP error: {pe}. Falling back to metrics-only promo.")
+                promo = (
+                    f"$DEGEN is trading at ${d['price_usd']:,.6f}. "
+                    f"Market cap: ${d['market_cap']:,.0f}K. "
+                    f"24h volume: ${d['volume_usd']:,.1f}K. "
+                    f"1h change: {d['change_1h']:+.2f}%, 24h change: {d['change_24h']:+.2f}%"
+                )
+            except Exception as e:
+                logger.error(f"Unexpected promo error: {e}. Skipping this hour.")
+                promo = None
+
+            if promo:
+                x_client.create_tweet(text=promo)
+                logger.info("Hourly promo sent successfully.")
         except Exception as e:
-            logger.error(f"promo error: {e}")
+            logger.error(f"promo loop error: {e}")
+        # Wait one hour before next promo
         await asyncio.sleep(3600)
 
 async def poll_loop():

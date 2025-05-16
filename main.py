@@ -190,7 +190,7 @@ async def degen_hourly_loop():
             system = (
                 "Write exactly 4 sentences: positive, engaging, community-focused tweet about $DEGEN on Solana, "
                 f"using metrics price ${d['price_usd']:,.6f}, market cap ${d['market_cap']:,.0f}K, vol24 ${d['volume_usd']:,.1f}K. "
-                "Include the contract 6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f. Return only text up to 280 chars."
+                "Return only text up to 280 chars."
             )
             promo = ask_perplexity(system, "", max_tokens=200)
             x_client.create_tweet(text=promo[:280])

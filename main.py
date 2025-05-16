@@ -133,38 +133,57 @@ def resolve_token(q):
         return None, None
 
 async def handle_mention(ev):
-    txt = ev['tweet_create_events'][0]['text'].replace('@askdegen', '').strip()
-    tid = ev['tweet_create_events'][0]['id_str']
+    # Guard against malformed payload
+    events = ev.get('tweet_create_events') or []
+    if not events or 'text' not in events[0]:
+        logger.warning("No mention events to handle, skipping.")
+        return {"message": "no events"}
+
+    txt = events[0]['text'].replace('@askdegen', '').strip()
+    tid = events[0]['id_str']
+    # Identify first token or contract in text
     token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
     if token:
         sym, addr = resolve_token(token)
         if addr:
             d = fetch_data(addr)
             if txt.strip() == token:
+                # Pure data reply
                 lines = [
                     f"🚀 {d['symbol']} | ${d['price_usd']:,.6f}",
                     f"MC ${d['market_cap']:,.0f}K | Vol24 ${d['volume_usd']:,.1f}K",
                     f"1h {'🟢' if d['change_1h'] >= 0 else '🔴'}{d['change_1h']:+.2f}% | 24h {'🟢' if d['change_24h'] >= 0 else '🔴'}{d['change_24h']:+.2f}%",
                     d['link']
                 ]
-                reply = "\n".join(lines)
+                reply = "
+".join(lines)
             else:
+                # Data + conversational
                 system = (
-                    f"Expert Solana analyst: given these metrics {json.dumps(d)}, craft a concise (<240 chars) conversational reply."
+                    f"Expert Solana analyst: given these metrics {json.dumps(d)}, craft a concise conversational reply."
                 )
-                reply = ask_perplexity(system, txt, 150)
+                reply = ask_perplexity(system, txt, max_tokens=150)
         else:
-            reply = ask_perplexity("Crypto details unavailable—one concise tweet.", txt, 80)
+            reply = ask_perplexity(
+                "Crypto details unavailable—one concise tweet.",
+                txt,
+                max_tokens=150
+            )
     else:
+        # Freeform questions
         reply = ask_grok(
             "Professional crypto professor: concise analytical response.",
             txt,
-            120
+            max_tokens=150
         )
-    x_client.create_tweet(text=reply[:240], in_reply_to_tweet_id=int(tid))
+
+    # Enforce 240-char limit on mention replies
+    truncated = reply[:240]
+    x_client.create_tweet(text=truncated, in_reply_to_tweet_id=int(tid))
     return {'message': 'ok'}
 
 async def degen_hourly_loop():
+():
     """
     Every hour: tweet a DexScreener-style metrics card plus a 2-sentence analysis for $DEGEN.
     """

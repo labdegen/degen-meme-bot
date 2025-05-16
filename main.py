@@ -185,6 +185,7 @@ async def root():
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(poll_loop())
+    asyncio.create_task(hourly_post_loop())
 
 async def poll_loop():
     while True:
@@ -209,6 +210,21 @@ async def poll_loop():
                 db.set(f"{REDIS_PREFIX}last_tweet_id", tw.id)
                 db.set(f"{REDIS_PREFIX}last_mention", int(time.time()))
         await asyncio.sleep(90)
+
+async def hourly_post_loop():
+    while True:
+        try:
+            d = fetch_data(DEGEN_ADDR)
+            card = format_metrics(d)
+            context = ask_grok("You're a Degen community member summarizing recent metrics. Make it casual, grounded, and complete within 2 sentences.", json.dumps(d), max_tokens=160)
+            tweet = f"{card}\n{context}"
+            if len(tweet) > 280:
+                tweet = tweet[:280].rsplit('.', 1)[0] + '.'
+            x_client.create_tweet(text=tweet)
+            logger.info("Hourly promo posted")
+        except Exception as e:
+            logger.error(f"Promo loop error: {e}")
+        await asyncio.sleep(3600)
 
 async def handle_mention(ev: dict):
     events = ev.get('tweet_create_events') or []

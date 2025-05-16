@@ -31,7 +31,6 @@ for v in required_vars:
 
 # API endpoints
 GROK_URL = "https://api.x.ai/v1/chat/completions"
-PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
 DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
 
 # Credentials
@@ -41,7 +40,6 @@ ACCESS_TOKEN = os.getenv("X_ACCESS_TOKEN")
 ACCESS_TOKEN_SECRET = os.getenv("X_ACCESS_TOKEN_SECRET")
 BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
 GROK_KEY = os.getenv("GROK_API_KEY")
-PERPLEXITY_KEY = os.getenv("PERPLEXITY_API_KEY")
 
 # Redis client
 db = redis.Redis(
@@ -92,26 +90,6 @@ def ask_grok(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str
     r.raise_for_status()
     return r.json()["choices"][0]["message"]["content"].strip()
 
-def ask_perplexity(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str:
-    payload = {
-        'model': 'sonar-pro',
-        'messages': [
-            {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': user_prompt or 'Generate a tweet about Solana token DEGEN.'}
-        ],
-        'max_tokens': max_tokens,
-        'temperature': 1.0,
-        'top_p': 0.9,
-        'search_recency_filter': 'week'
-    }
-    headers = {
-        'Authorization': f'Bearer {PERPLEXITY_KEY}',
-        'Content-Type': 'application/json'
-    }
-    r = requests.post(PERPLEXITY_URL, json=payload, headers=headers, timeout=60)
-    r.raise_for_status()
-    return r.json()['choices'][0]['message']['content'].strip()
-
 def fetch_data(addr: str) -> dict:
     cache_key = f"{REDIS_PREFIX}dex:{addr}"
     if cached := db.get(cache_key):
@@ -149,16 +127,7 @@ def resolve_token(q: str) -> tuple:
                 return symbol, addr
     except:
         pass
-    out = ask_grok(
-        "Map Solana symbol to its contract address. Return JSON {'symbol':str,'address':str}.",
-        f"Symbol: {s}",
-        100
-    )
-    try:
-        j = json.loads(out)
-        return j.get('symbol'), j.get('address')
-    except:
-        return None, None
+    return None, None
 
 async def handle_mention(ev: dict):
     events = ev.get('tweet_create_events') or []
@@ -183,14 +152,16 @@ async def handle_mention(ev: dict):
                 ]
                 reply = "\n".join(lines)
             else:
-                prompt = f"Expert Solana analyst: metrics {json.dumps(d)}. Reply conversationally (<240 chars)."
-                reply = ask_perplexity(prompt, txt, max_tokens=150)
+                prompt = f"You are a professional analyst. Based on metrics {json.dumps(d)}, write a polished 240-character max tweet response to a crypto investor. End your thought clearly."
+                reply = ask_grok(prompt, txt, max_tokens=160)
         else:
-            reply = ask_perplexity("Crypto details unavailable—one concise tweet.", txt, max_tokens=150)
+            reply = ask_grok("Professional analyst: reply under 240 characters clearly.", txt, max_tokens=160)
     else:
-        reply = ask_grok("Professional crypto professor: concise analytical response.", txt, max_tokens=150)
+        reply = ask_grok("Professional crypto professor: concise analytical response.", txt, max_tokens=160)
 
-    tweet = reply[:240]
+    tweet = reply.strip()
+    if len(tweet) > 240:
+        tweet = tweet[:240].rsplit('.', 1)[0] + '.'
     x_client.create_tweet(text=tweet, in_reply_to_tweet_id=int(tid))
     return {'message': 'ok'}
 
@@ -204,25 +175,16 @@ async def degen_hourly_loop():
                 f"1h {'🟢' if d['change_1h'] >= 0 else '🔴'}{d['change_1h']:+.2f}% | 24h {'🟢' if d['change_24h'] >= 0 else '🔴'}{d['change_24h']:+.2f}%",
                 d['link']
             ]
-            sys_msg = "You're a longtime $DEGEN holder. Give a friendly, first-person 2-sentence update on current trends using metrics."
+            sys_msg = "You are a member of the DEGEN community. Based on the metrics, write a natural and human-sounding 2-3 sentence tweet update. End your thought."
+            analysis = ask_grok(sys_msg, '', max_tokens=180)
+            tweet = "\n".join(card + [analysis])
+            if len(tweet) > 280:
+                tweet = tweet[:280].rsplit('.', 1)[0] + '.'
             try:
-                analysis = ask_grok(sys_msg, '', max_tokens=180)
-            except Exception as e:
-                logger.error(f"Promo fallback error: {e}")
-                analysis = "Still riding strong. More updates soon."
-
-            raw_tweet = "\n".join(card + [analysis])
-            if len(raw_tweet) > 280:
-                final_tweet = raw_tweet[:280].rsplit('.', 1)[0] + '.'
-            else:
-                final_tweet = raw_tweet
-
-            try:
-                x_client.create_tweet(text=final_tweet)
-                logger.info("Hourly promo posted via v2")
-            except Exception:
-                x_api.update_status(final_tweet)
-                logger.info("Hourly promo posted via v1 fallback")
+                x_client.create_tweet(text=tweet)
+                logger.info("Hourly promo posted")
+            except:
+                x_api.update_status(tweet)
         except Exception as e:
             logger.error(f"Promo loop error: {e}")
         await asyncio.sleep(3600)

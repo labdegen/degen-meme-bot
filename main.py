@@ -97,7 +97,7 @@ def ask_perplexity(system_prompt: str, user_prompt: str, max_tokens: int = 200) 
         'model': 'sonar-pro',
         'messages': [
             {'role': 'system', 'content': system_prompt},
-            {'role': 'user', 'content': user_prompt or ''}
+            {'role': 'user', 'content': user_prompt or 'Generate a tweet about Solana token DEGEN.'}
         ],
         'max_tokens': max_tokens,
         'temperature': 1.0,
@@ -162,9 +162,9 @@ def resolve_token(q: str) -> tuple:
 
 async def handle_mention(ev: dict):
     events = ev.get('tweet_create_events') or []
-    if not events or 'text' not in events[0]:
-        logger.warning("Skipping empty mention payload")
-        return {"message": "no events"}
+    if not events or not isinstance(events, list) or not events[0].get("text"):
+        logger.warning("Skipping invalid or empty mention event")
+        return {"message": "no valid mention"}
 
     txt = events[0]['text'].replace('@askdegen', '').strip()
     tid = events[0]['id_str']
@@ -206,10 +206,10 @@ async def degen_hourly_loop():
             ]
             sys_msg = "You're a longtime $DEGEN holder. Give a friendly, first-person 2-sentence update on current trends using metrics."
             try:
-                analysis = ask_perplexity(sys_msg, '', max_tokens=180)
-            except Exception as e:
-                logger.error(f"Perplexity promo error {e}, falling back to Grok")
                 analysis = ask_grok(sys_msg, '', max_tokens=180)
+            except Exception as e:
+                logger.error(f"Promo fallback error: {e}")
+                analysis = "Still riding strong. More updates soon."
 
             raw_tweet = "\n".join(card + [analysis])
             if len(raw_tweet) > 280:

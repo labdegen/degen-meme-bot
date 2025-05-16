@@ -19,6 +19,8 @@ app = FastAPI()
 # Load environment variables
 load_dotenv()
 required_vars = [
+    "X_API_KEY", "X_API_SECRET",
+    "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET",
     "X_BEARER_TOKEN",
     "GROK_API_KEY", "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"
 ]
@@ -26,11 +28,17 @@ for var in required_vars:
     if not os.getenv(var):
         raise RuntimeError(f"Missing env var: {var}")
 
-# Tweepy client with OAuth 2.0 Bearer Token
-x_client = tweepy.Client(bearer_token=os.getenv("X_BEARER_TOKEN"))
+# Tweepy client with dual authentication
+x_client = tweepy.Client(
+    bearer_token=os.getenv("X_BEARER_TOKEN"),
+    consumer_key=os.getenv("X_API_KEY"),
+    consumer_secret=os.getenv("X_API_SECRET"),
+    access_token=os.getenv("X_ACCESS_TOKEN"),
+    access_token_secret=os.getenv("X_ACCESS_TOKEN_SECRET")
+)
 
-# Get @askdegen's user ID
-askdegen_user = x_client.get_me(user_auth=False).data
+# Get @askdegen's user ID using OAuth 1.0a User Context
+askdegen_user = x_client.get_me().data  # Uses OAuth 1.0a by default
 ASKDEGEN_ID = askdegen_user.id
 logger.info(f"Authenticated as: {askdegen_user.username}, ID: {ASKDEGEN_ID}")
 
@@ -94,7 +102,7 @@ def fetch_dexscreener_data(address: str, retries=3, backoff=2) -> dict:
             return {}
     return {}
 
-# Search X for token ticker to resolve contract address
+# Search X for token ticker to resolve contract address (uses Bearer Token)
 def search_x_for_token(ticker: str) -> tuple:
     query = f"{ticker} solana contract address -in:replies"
     try:
@@ -102,7 +110,7 @@ def search_x_for_token(ticker: str) -> tuple:
             query=query,
             tweet_fields=["text"],
             max_results=10,
-            user_auth=False
+            user_auth=False  # Use Bearer Token for higher rate limits
         )
         if not tweets.data:
             return None, None
@@ -135,7 +143,7 @@ def resolve_token(query: str) -> tuple:
     ticker = query if query.startswith("$") else f"${query}"
     return search_x_for_token(ticker)
 
-# Fetch real-time X sentiment and trends
+# Fetch real-time X sentiment and trends (uses Bearer Token)
 def fetch_x_sentiment_and_trends(token: str) -> dict:
     query = f"${token} -in:replies lang:en"
     try:
@@ -143,7 +151,7 @@ def fetch_x_sentiment_and_trends(token: str) -> dict:
             query=query,
             tweet_fields=["text", "created_at"],
             max_results=50,
-            user_auth=False
+            user_auth=False  # Use Bearer Token
         )
         if not tweets.data:
             return {"sentiment": "neutral", "trending": False, "mentions": 0, "recent_tweets": []}
@@ -178,7 +186,7 @@ def fetch_x_sentiment_and_trends(token: str) -> dict:
         logger.error(f"X sentiment category_id=x_sentiment_error, error={str(e)}")
         return {"sentiment": "neutral", "trending": False, "mentions": 0, "recent_tweets": []}
 
-# Fetch current events and context from X
+# Fetch current events and context from X (uses Bearer Token)
 def fetch_current_context() -> dict:
     queries = [
         "solana meme coin -in:replies lang:en",
@@ -192,7 +200,7 @@ def fetch_current_context() -> dict:
                 query=query,
                 tweet_fields=["text", "created_at"],
                 max_results=10,
-                user_auth=False
+                user_auth=False  # Use Bearer Token
             )
             if tweets.data:
                 key = ["trends", "news", "weather_impact"][i]
@@ -297,13 +305,13 @@ async def handle_mention(data: dict):
                     reply = r.json()["choices"][0]["message"]["content"].strip()
                     redis_client.setex(context_key, 86400, json.dumps({"query": txt, "response": reply}))
 
-        # Post reply
+        # Post reply (uses OAuth 1.0a User Context)
         try:
-            x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(reply_tid), user_auth=False)
+            x_client.create_tweet(text=reply, in_reply_to_tweet_id=int(reply_tid))
             redis_client.incr(f"{REDIS_CACHE_PREFIX}post_count")
             logger.info(f"Replied to mention: {reply} to tweet {reply_tid}")
         except tweepy.errors.Forbidden:
-            x_client.create_tweet(text=reply, user_auth=False)
+            x_client.create_tweet(text=reply)
             redis_client.incr(f"{REDIS_CACHE_PREFIX}post_count")
             logger.info(f"Created new tweet for mention: {reply} (couldn't reply)")
 
@@ -312,7 +320,7 @@ async def handle_mention(data: dict):
         logger.error(f"Mention category_id=mention_error, error={str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Polling loop to check mentions
+# Polling loop to check mentions (uses OAuth 1.0a User Context)
 async def poll_mentions():
     last_id = redis_client.get(f"{REDIS_CACHE_PREFIX}last_tweet_id")
     since_id = int(last_id) if last_id else None
@@ -331,8 +339,7 @@ async def poll_mentions():
             tweet_fields=["id", "text", "author_id", "in_reply_to_status_id"],
             user_fields=["username"],
             expansions=["author_id"],
-            max_results=10,
-            user_auth=False
+            max_results=10
         )
         if tweets.data:
             users = {u.id: u.username for u in tweets.includes.get("users", [])}

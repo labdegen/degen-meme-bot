@@ -9,6 +9,7 @@ import redis
 import json
 import asyncio
 import time
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -93,7 +94,9 @@ def ask_grok(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str
     return r.json()["choices"][0]["message"]["content"].strip()
 
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
 def ask_perplexity(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str:
+    """Enhanced Perplexity API call with retry logic"""
     payload = {
         'model': 'sonar-pro',
         'messages': [
@@ -101,7 +104,7 @@ def ask_perplexity(system_prompt: str, user_prompt: str, max_tokens: int = 200) 
             {'role': 'user', 'content': user_prompt or ''}
         ],
         'max_tokens': max_tokens,
-        'temperature': 1.0,
+        'temperature': 0.9,  # Slightly reduced for more consistent outputs
         'top_p': 0.9,
         'search_recency_filter': 'week'
     }
@@ -109,9 +112,13 @@ def ask_perplexity(system_prompt: str, user_prompt: str, max_tokens: int = 200) 
         'Authorization': f'Bearer {PERPLEXITY_KEY}',
         'Content-Type': 'application/json'
     }
-    r = requests.post(PERPLEXITY_URL, json=payload, headers=headers, timeout=60)
-    r.raise_for_status()
-    return r.json()['choices'][0]['message']['content'].strip()
+    try:
+        r = requests.post(PERPLEXITY_URL, json=payload, headers=headers, timeout=30)
+        r.raise_for_status()
+        return r.json()['choices'][0]['message']['content'].strip()
+    except Exception as e:
+        logger.error(f"Perplexity API error: {e}")
+        raise
 
 
 def fetch_data(addr: str) -> dict:
@@ -120,7 +127,7 @@ def fetch_data(addr: str) -> dict:
         return json.loads(cached)
     r = requests.get(f"{DEXS_URL}{addr}", timeout=10)
     r.raise_for_status()
-    data = r.json()[0]
+    data = r.json().get('pairs', [])[0] if r.json().get('pairs') else r.json()[0]
     base = data.get('baseToken', {})
     out = {
         'symbol':     base.get('symbol'),
@@ -144,24 +151,35 @@ def resolve_token(q: str) -> tuple:
     try:
         resp = requests.get(f"https://api.dexscreener.com/latest/dex/search?search={s}", timeout=10)
         resp.raise_for_status()
-        for item in resp.json():
+        data = resp.json()
+        pairs = data.get('pairs', data)  # Handle both response formats
+        for item in pairs:
             if item.get('chainId') == 'solana':
                 base = item['baseToken']
                 symbol = base.get('symbol')
                 addr = item.get('pairAddress') or base.get('address')
                 return symbol, addr
-    except:
-        pass
-    out = ask_grok(
-        "Map Solana symbol to its contract address. Return JSON {'symbol':str,'address':str}.",
-        f"Symbol: {s}",
-        100
-    )
+    except Exception as e:
+        logger.warning(f"DexScreener search error: {e}")
+    
     try:
+        out = ask_grok(
+            "Map Solana symbol to its contract address. Return JSON {'symbol':str,'address':str}.",
+            f"Symbol: {s}",
+            100
+        )
         j = json.loads(out)
         return j.get('symbol'), j.get('address')
-    except:
+    except Exception as e:
+        logger.warning(f"Grok token resolution error: {e}")
         return None, None
+
+
+def clean_mention_text(text: str) -> str:
+    """Better processing of mention text to handle multiple @mentions"""
+    # Remove all @username mentions (not just @askdegen)
+    cleaned = re.sub(r'@\w+', '', text).strip()
+    return cleaned
 
 
 async def handle_mention(ev: dict):
@@ -170,8 +188,12 @@ async def handle_mention(ev: dict):
         logger.warning("Skipping empty mention payload")
         return {"message": "no events"}
 
-    txt = events[0]['text'].replace('@askdegen', '').strip()
-    tid = events[0]['id_str']
+    tweet_data = events[0]
+    original_text = tweet_data['text']
+    txt = clean_mention_text(original_text)
+    tid = tweet_data['id_str']
+    
+    logger.info(f"Processing mention: {txt[:50]}...")
 
     # find first $TOKEN or address
     token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
@@ -190,22 +212,46 @@ async def handle_mention(ev: dict):
                 reply = "\n".join(lines)
             else:
                 # metrics + conversational
-                prompt = f"Expert Solana analyst: metrics {json.dumps(d)}. Reply conversationally (<240 chars)."
-                reply = ask_perplexity(prompt, txt, max_tokens=150)
+                try:
+                    prompt = f"Expert Solana analyst: {d['symbol']} metrics: price ${d['price_usd']:,.6f}, 24h change {d['change_24h']:+.2f}%, market cap ${d['market_cap']:,.0f}K. Reply conversationally to '{txt}' (<230 chars)."
+                    reply = ask_perplexity(prompt, txt, max_tokens=100)
+                except Exception:
+                    # Fallback to more reliable but simpler response
+                    prompt = f"As crypto analyst, comment briefly on {d['symbol']} price ${d['price_usd']:,.6f} with {d['change_24h']:+.2f}% 24h change."
+                    reply = ask_grok(prompt, txt, max_tokens=100)
         else:
-            reply = ask_perplexity("Crypto details unavailable—one concise tweet.", txt, max_tokens=150)
+            try:
+                reply = ask_perplexity("Crypto advisor: respond briefly to this query (<220 chars).", txt, max_tokens=100)
+            except Exception:
+                reply = ask_grok("Professional crypto professor: concise analytical response.", txt, max_tokens=100)
     else:
-        reply = ask_grok("Professional crypto professor: concise analytical response.", txt, max_tokens=150)
+        try:
+            reply = ask_perplexity("Expert crypto analyst: provide brief, helpful response (<220 chars).", txt, max_tokens=100)
+        except Exception:
+            reply = ask_grok("Professional crypto professor: concise analytical response.", txt, max_tokens=100)
 
-    # truncate to 240 chars
+    # ensure tweet is under character limit
     tweet = reply[:240]
-    x_client.create_tweet(text=tweet, in_reply_to_tweet_id=int(tid))
+    
+    try:
+        logger.info(f"Replying to tweet ID {tid} with: {tweet[:50]}...")
+        x_client.create_tweet(text=tweet, in_reply_to_tweet_id=int(tid))
+        logger.info("Reply posted successfully")
+    except Exception as e:
+        logger.error(f"Tweet reply error: {e}")
+        try:
+            # Legacy fallback
+            x_api.update_status(status=tweet, in_reply_to_status_id=int(tid))
+            logger.info("Reply posted via legacy API")
+        except Exception as e2:
+            logger.error(f"Legacy reply also failed: {e2}")
+    
     return {'message': 'ok'}
 
 
 async def degen_hourly_loop():
     """
-    Hourly promo: DexScreener card + 2-sentence analysis (<=280 chars)
+    Hourly promo: DexScreener card + short analysis (<=280 chars)
     """
     while True:
         try:
@@ -216,17 +262,35 @@ async def degen_hourly_loop():
                 f"1h {'🟢' if d['change_1h'] >= 0 else '🔴'}{d['change_1h']:+.2f}% | 24h {'🟢' if d['change_24h'] >= 0 else '🔴'}{d['change_24h']:+.2f}%",
                 d['link']
             ]
-            sys_msg = "Professional crypto professor: craft 2-sentence positive yet realistic commentary on $DEGEN."
+            
+            # Calculate remaining character space (Twitter limit is 280)
+            card_length = sum(len(line) + 1 for line in card) - 1  # -1 because the last line doesn't need a newline
+            remaining_chars = 280 - card_length - 1  # -1 for the newline between card and analysis
+            
+            # Adjust token limit to ensure we get an appropriate length response
+            token_limit = max(20, remaining_chars // 4)  # Approx 4 chars per token as a safe estimate
+            
+            sys_msg = f"Professional crypto analyst: create a brief, positive yet realistic comment on $DEGEN (must be under {remaining_chars} characters)."
+            
             try:
-                analysis = ask_perplexity(sys_msg, "", max_tokens=80)
+                analysis = ask_perplexity(sys_msg, "", max_tokens=token_limit)
+                # Double-check length
+                if len(analysis) > remaining_chars:
+                    analysis = analysis[:remaining_chars]
             except Exception as e:
                 logger.error(f"Perplexity promo error {e}, falling back to Grok")
-                analysis = ask_grok(sys_msg, "", max_tokens=80)
-            tweet = ("\n".join(card + [analysis]))[:280]
+                analysis = ask_grok(sys_msg, "", max_tokens=token_limit)
+                if len(analysis) > remaining_chars:
+                    analysis = analysis[:remaining_chars]
+            
+            tweet = "\n".join(card + [analysis])
+            logger.info(f"Posting hourly promo ({len(tweet)}/280 chars)")
+            
             try:
                 x_client.create_tweet(text=tweet)
                 logger.info("Hourly promo posted via v2")
-            except Exception:
+            except Exception as e:
+                logger.error(f"Twitter v2 API error: {e}")
                 x_api.update_status(tweet)
                 logger.info("Hourly promo posted via v1 fallback")
         except Exception as e:
@@ -236,28 +300,44 @@ async def degen_hourly_loop():
 
 async def poll_loop():
     while True:
-        last = db.get(f"{REDIS_PREFIX}last_tweet_id")
-        since_id = int(last) if last else None
-        res = x_client.get_users_mentions(
-            id=BOT_ID,
-            since_id=since_id,
-            tweet_fields=['id','text','author_id'],
-            expansions=['author_id'],
-            user_fields=['username'],
-            max_results=10
-        )
-        if res and res.data:
-            users = {u.id: u.username for u in res.includes.get('users', [])}
-            for tw in reversed(res.data):
-                ev = {'tweet_create_events': [{'id_str': str(tw.id), 'text': tw.text, 'user': {'screen_name': users.get(tw.author_id, '?')}}]}
-                try:
-                    await handle_mention(ev)
-                except Exception as e:
-                    logger.error(f"Mention error: {e}")
-                db.set(f"{REDIS_PREFIX}last_tweet_id", tw.id)
-                db.set(f"{REDIS_PREFIX}last_mention", int(time.time()))
-        lm = db.get(f"{REDIS_PREFIX}last_mention")
-        await asyncio.sleep(90 if lm and time.time() - int(lm) < 3600 else 1800)
+        try:
+            last = db.get(f"{REDIS_PREFIX}last_tweet_id")
+            since_id = int(last) if last else None
+            
+            logger.info(f"Polling mentions since ID: {since_id}")
+            res = x_client.get_users_mentions(
+                id=BOT_ID,
+                since_id=since_id,
+                tweet_fields=['id','text','author_id'],
+                expansions=['author_id'],
+                user_fields=['username'],
+                max_results=10
+            )
+            
+            if res and res.data:
+                users = {u.id: u.username for u in res.includes.get('users', [])}
+                logger.info(f"Found {len(res.data)} new mentions")
+                
+                for tw in reversed(res.data):
+                    ev = {'tweet_create_events': [{'id_str': str(tw.id), 'text': tw.text, 'user': {'screen_name': users.get(tw.author_id, '?')}}]}
+                    try:
+                        await handle_mention(ev)
+                    except Exception as e:
+                        logger.error(f"Mention handling error: {e}")
+                    
+                    db.set(f"{REDIS_PREFIX}last_tweet_id", tw.id)
+                    db.set(f"{REDIS_PREFIX}last_mention", int(time.time()))
+            
+            # Adapt polling interval based on activity
+            lm = db.get(f"{REDIS_PREFIX}last_mention")
+            # Poll more frequently if there's been recent activity
+            polling_interval = 90 if lm and time.time() - int(lm) < 3600 else 1800
+            logger.info(f"Next poll in {polling_interval} seconds")
+            await asyncio.sleep(polling_interval)
+            
+        except Exception as e:
+            logger.error(f"Poll loop error: {e}")
+            await asyncio.sleep(300)  # Back off on errors
 
 
 @app.on_event('startup')

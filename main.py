@@ -112,7 +112,7 @@ PROMO_IDX = f"{REDIS_PREFIX}promo_idx"
 # KB for $DEGEN
 DEGEN_KB = [
     "🚀 First $DEGEN on pump.fun (March 2024)",
-    "🤝 100% organic token—no pre-mine/private sale",
+    "🤝 100% organic token",
     "🎮 Play Jeets vs Degens at jeetsvsdegens.com"
 ]
 
@@ -191,52 +191,7 @@ async def handle_mention(ev: dict):
     tid = ev['tweet_create_events'][0]['id_str']
     words = txt.split()
 
-    # Crypto queries
-    if len(words) == 1 and (words[0].startswith('$') or re.match(r'^[A-Za-z0-9]{43,44}$', words[0])):
-        tok, addr = resolve_token(words[0])
-        if not addr:
-            reply = ask_perplexity(
-                "Crypto data unavailable—one concise tweet.",
-                txt,
-                80
-            )
-        else:
-            d = fetch_dexscreener_data(addr)
-            lines = [
-                f"🚀 {d['symbol']} | ${d['price_usd']:.6f}",
-                f"MC ${d['market_cap']:.0f}K | Vol24 ${d['volume_usd']:.1f}K",
-                f"1h {'🟢' if d['change_1h']>=0 else '🔴'}{d['change_1h']:+.2f}% | 24h {'🟢' if d['change_24h']>=0 else '🔴'}{d['change_24h']:+.2f}%",
-            ]
-            # Include project and socials if available
-            if d.get('project_url'):
-                lines.append(f"🌐 {d['project_url']}")
-            for soc_line in format_socials(d.get('socials', [])):
-                lines.append(soc_line)
-            lines.append(f"🔗 https://dexscreener.com/solana/{addr}")
-            if tok == 'DEGEN':
-                lines += DEGEN_KB
-            reply = "\n".join(lines)
-        x_client.create_tweet(text=reply[:240], in_reply_to_tweet_id=int(tid))
-        return {'message': 'ok'}
-
-    # Non-crypto: use Grok
-    reply = ask_grok(
-        "Answer as Tim Dillon: witty, direct, one tweet (<240 chars).",
-        txt,
-        120
-    )
-    x_client.create_tweet(text=reply[:240], in_reply_to_tweet_id=int(tid))
-    return {'message': 'ok'}
-
-# Hourly promo loop
-TEMPLATES = [
-    "🚀 $DEGEN at ${price:.6f}, MC ${mcap:.0f}K—strong volume signals genuine buzz among Solana traders. @ogdegenonsol",
-    "💥 $DEGEN trades at ${price:.6f} with MC ${mcap:.0f}K—liquidity pools deep as engagement surges. @ogdegenonsol",
-    "🔥 $DEGEN price ${price:.6f}, MC ${mcap:.0f}K—organic momentum driving new highs. @ogdegenonsol",
-    "🎉 $DEGEN now ${price:.6f}, MC ${mcap:.0f}K—solid retention and community growth. @ogdegenonsol"
-]
-
- def compose_promo() -> str:
+def compose_promo() -> str:
     idx = int(redis_client.get(PROMO_IDX) or 0) % len(TEMPLATES)
     redis_client.set(PROMO_IDX, (idx + 1) % len(TEMPLATES))
     d = fetch_dexscreener_data(DEGEN_ADDR)

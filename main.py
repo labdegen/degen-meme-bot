@@ -9,7 +9,6 @@ import redis
 import json
 import asyncio
 import time
-import random
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -37,13 +36,54 @@ access_token = os.getenv("X_ACCESS_TOKEN")
 access_token_secret = os.getenv("X_ACCESS_TOKEN_SECRET")
 bearer_token = os.getenv("X_BEARER_TOKEN")
 
-# API keys
+# API endpoints
 grok_url = "https://api.x.ai/v1/chat/completions"
-grok_key = os.getenv("GROK_API_KEY")
 perplexity_url = "https://api.perplexity.ai/chat/completions"
+DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
+DEX_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search?search={}"
+
+# API keys
+grok_key = os.getenv("GROK_API_KEY")
 perplexity_key = os.getenv("PERPLEXITY_API_KEY")
 
-# Grok helper
+# Redis setup
+redis_client = redis.Redis(
+    host=os.getenv("REDIS_HOST"),
+    port=int(os.getenv("REDIS_PORT")),
+    password=os.getenv("REDIS_PASSWORD"),
+    decode_responses=True,
+    socket_timeout=5,
+    socket_connect_timeout=5
+)
+redis_client.ping()
+logger.info("Redis connected")
+
+# Initialize X client
+x_client = tweepy.Client(
+    bearer_token=bearer_token,
+    consumer_key=api_key,
+    consumer_secret=api_key_secret,
+    access_token=access_token,
+    access_token_secret=access_token_secret
+)
+# Get bot ID
+token_data = x_client.get_me().data
+ASKDEGEN_ID = token_data.id
+logger.info(f"Authenticated as: {token_data.username}, ID: {ASKDEGEN_ID}")
+
+# Constants
+REDIS_PREFIX = "degen:"
+DEGEN_ADDR = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
+
+# Knowledge base for $DEGEN
+DEGEN_KB = [
+    "🚀 First $DEGEN on pump.fun (March 2024)",
+    "🤝 100% organic token—no pre-mine/private sale",
+    "🎮 Play Jeets vs Degens at jeetsvsdegens.com"
+]
+
+# Helpers
+
 def ask_grok(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str:
     body = {
         "model": "grok-3",
@@ -59,7 +99,7 @@ def ask_grok(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"].strip()
 
-# Perplexity helper
+
 def ask_perplexity(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str:
     payload = {
         'model': 'sonar-pro',
@@ -77,46 +117,7 @@ def ask_perplexity(system_prompt: str, user_prompt: str, max_tokens: int = 200) 
     resp.raise_for_status()
     return resp.json()['choices'][0]['message']['content'].strip()
 
-# Initialize X client
-x_client = tweepy.Client(
-    bearer_token=bearer_token,
-    consumer_key=api_key,
-    consumer_secret=api_key_secret,
-    access_token=access_token,
-    access_token_secret=access_token_secret
-)
-# Get bot ID
-token_data = x_client.get_me().data
-ASKDEGEN_ID = token_data.id
-logger.info(f"Authenticated as: {token_data.username}, ID: {ASKDEGEN_ID}")
 
-# Redis client
-redis_client = redis.Redis(
-    host=os.getenv("REDIS_HOST"),
-    port=int(os.getenv("REDIS_PORT")),
-    password=os.getenv("REDIS_PASSWORD"),
-    decode_responses=True,
-    socket_timeout=5,
-    socket_connect_timeout=5
-)
-redis_client.ping()
-logger.info("Redis connected")
-
-# Constants
-DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
-DEX_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search?search={}"
-REDIS_PREFIX = "degen:"
-DEGEN_ADDR = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
-PROMO_IDX = f"{REDIS_PREFIX}promo_idx"
-
-# KB for $DEGEN
-DEGEN_KB = [
-    "🚀 First $DEGEN on pump.fun (March 2024)",
-    "🤝 100% organic token",
-    "🎮 Play Jeets vs Degens at jeetsvsdegens.com"
-]
-
-# Fetch live DexScreener data including socials
 def fetch_dexscreener_data(addr: str) -> dict:
     key = f"{REDIS_PREFIX}dex:{addr}"
     if cached := redis_client.get(key):
@@ -140,7 +141,7 @@ def fetch_dexscreener_data(addr: str) -> dict:
     redis_client.setex(key, 300, json.dumps(out))
     return out
 
-# Search by ticker
+
 def search_symbol(sym: str) -> tuple:
     try:
         resp = requests.get(DEX_SEARCH_URL.format(sym), timeout=10)
@@ -154,20 +155,16 @@ def search_symbol(sym: str) -> tuple:
         pass
     return None, None
 
-# Resolve token
+
 def resolve_token(q: str) -> tuple:
     s = q.upper().lstrip('$')
-    if s == 'DEGEN':
-        return 'DEGEN', DEGEN_ADDR
-    if re.match(r'^[A-Za-z0-9]{43,44}$', s):
-        return None, s
+    if s == 'DEGEN': return 'DEGEN', DEGEN_ADDR
+    if re.match(r'^[A-Za-z0-9]{43,44}$', s): return None, s
     sym, addr = search_symbol(s)
-    if addr:
-        return sym, addr
+    if addr: return sym, addr
     out = ask_grok(
         "Map a Solana token symbol to its address. Return JSON {\"symbol\":str,\"address\":str}.",
-        f"Symbol: {s}",
-        100
+        f"Symbol: {s}", 100
     )
     try:
         j = json.loads(out)
@@ -175,7 +172,7 @@ def resolve_token(q: str) -> tuple:
     except:
         return None, None
 
-# Format socials into lines
+
 def format_socials(socials: list) -> list:
     lines = []
     for soc in socials:
@@ -185,43 +182,67 @@ def format_socials(socials: list) -> list:
             lines.append(f"{name}: {url}")
     return lines
 
-# Handle mention event
 async def handle_mention(ev: dict):
     txt = ev['tweet_create_events'][0]['text'].replace('@askdegen', '').strip()
     tid = ev['tweet_create_events'][0]['id_str']
     words = txt.split()
 
-def compose_promo() -> str:
-    idx = int(redis_client.get(PROMO_IDX) or 0) % len(TEMPLATES)
-    redis_client.set(PROMO_IDX, (idx + 1) % len(TEMPLATES))
-    d = fetch_dexscreener_data(DEGEN_ADDR)
-    return TEMPLATES[idx].format(price=d['price_usd'], mcap=d['market_cap'])[:240]
+    if len(words) == 1 and (words[0].startswith('$') or re.match(r'^[A-Za-z0-9]{43,44}$', words[0])):
+        tok, addr = resolve_token(words[0])
+        if not addr:
+            reply = ask_perplexity(
+                "Crypto data unavailable—one concise tweet.", txt, 80
+            )
+        else:
+            d = fetch_dexscreener_data(addr)
+            lines = [
+                f"🚀 {d['symbol']} | ${d['price_usd']:.6f}",
+                f"MC ${d['market_cap']:.0f}K | Vol24 ${d['volume_usd']:.1f}K",
+                f"1h {'🟢' if d['change_1h']>=0 else '🔴'}{d['change_1h']:+.2f}% | 24h {'🟢' if d['change_24h']>=0 else '🔴'}{d['change_24h']:+.2f}%",
+            ]
+            if d.get('project_url'): lines.append(f"🌐 {d['project_url']}")
+            for soc_line in format_socials(d.get('socials', [])):
+                lines.append(soc_line)
+            lines.append(f"🔗 https://dexscreener.com/solana/{addr}")
+            if tok == 'DEGEN': lines += DEGEN_KB
+            reply = "\n".join(lines)
+        x_client.create_tweet(text=reply[:240], in_reply_to_tweet_id=int(tid))
+        return {'message': 'ok'}
 
+    reply = ask_grok(
+        "Answer as Tim Dillon: witty, direct, one tweet (<240 chars).", txt, 120
+    )
+    x_client.create_tweet(text=reply[:240], in_reply_to_tweet_id=int(tid))
+    return {'message': 'ok'}
+
+# Dynamic hourly promo using Perplexity
 async def degen_hourly_loop():
     while True:
         try:
-            promo = compose_promo()
-            x_client.create_tweet(text=promo)
+            d = fetch_dexscreener_data(DEGEN_ADDR)
+            system = (
+                "Dynamic promo copywriter: craft a positive, engaging, Solana community–focused promotional tweet of exactly 4 sentences for $DEGEN, "
+                f"using these up-to-the-minute metrics: price ${d['price_usd']:.6f}, market cap ${d['market_cap']:.0f}K, volume24 ${d['volume_usd']:.1f}K."
+            )
+            user = "Generate tweet limited to 240 characters."
+            promo = ask_perplexity(system, user, max_tokens=200)
+            x_client.create_tweet(text=promo[:240])
             logger.info("promo sent")
         except Exception as e:
             logger.error(f"promo error: {e}")
         await asyncio.sleep(3600)
 
-# Polling loop
 async def poll_mentions():
     last = redis_client.get(f"{REDIS_PREFIX}last_tweet_id")
     since = int(last) if last else None
     res = x_client.get_users_mentions(
         id=ASKDEGEN_ID, since_id=since,
-        tweet_fields=['id','text','author_id'],
-        expansions=['author_id'], user_fields=['username'],
-        max_results=10
+        tweet_fields=['id','text','author_id'], expansions=['author_id'], user_fields=['username'], max_results=10
     )
-    if not res or not res.data:
-        return
+    if not res or not res.data: return
     users = {u.id: u.username for u in res.includes.get('users', [])}
     for tw in reversed(res.data):
-        ev = {'tweet_create_events': [{'id_str': str(tw.id), 'text': tw.text, 'user': {'screen_name': users.get(tw.author_id, '?')}}]}
+        ev = {'tweet_create_events':[{'id_str':str(tw.id),'text':tw.text,'user':{'screen_name':users.get(tw.author_id,'?')}}]}
         try:
             await handle_mention(ev)
         except Exception as e:
@@ -242,10 +263,10 @@ async def on_startup():
 
 @app.get('/')
 async def root():
-    return {'message': 'Degen Meme Bot is live.'}
+    return {'message':'Degen Meme Bot is live.'}
 
 @app.post('/test')
 async def test_bot(r: Request):
     b = await r.json()
-    ev = {'tweet_create_events': [{'id_str': '0', 'text': b.get('text',''), 'user': {'screen_name': 'test'}}]}
+    ev = {'tweet_create_events':[{'id_str':'0','text':b.get('text',''),'user':{'screen_name':'test'}}]}
     return await handle_mention(ev)

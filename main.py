@@ -95,7 +95,7 @@ def ask_grok(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str
         return r.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
         logger.error(f"Grok fallback: {e}")
-        return "Insight currently unavailable. Check back soon."
+        return "$DEGEN coded"
 
 def ask_perplexity(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str:
     payload = {

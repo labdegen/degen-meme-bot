@@ -9,6 +9,7 @@ import redis
 import json
 import asyncio
 import time
+import random
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -66,6 +67,7 @@ DEXSCREENER_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
 DEX_SEARCH_URL = "https://api.dexscreener.com/latest/dex/search?search={}"
 REDIS_CACHE_PREFIX = "degen:"
 DEGEN_ADDRESS = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
+PROMO_IDX_KEY = f"{REDIS_CACHE_PREFIX}promo_idx"
 
 # Helper: call Perplexity API
 def ask_perplexity(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str:
@@ -190,26 +192,31 @@ async def handle_mention(data: dict):
 
 # Hourly DEGEN promotional loop
 def compose_degen_promo():
+    # Track template rotation
+    templates = [
+        "🚀 $DEGEN is at ${price:.6f} with MC of ${mcap:.0f}K—momentum building as top Solana degens rally behind our community! @ogdegenonsol",
+        "💥 $DEGEN trades at ${price:.6f} (MC ${mcap:.0f}K). Robust volume and bullish sentiment highlight growing confidence. @ogdegenonsol",
+        "🔥 $DEGEN on Solana: price ${price:.6f}, MC ${mcap:.0f}K. Uptrend hints at breakout potential—don’t miss the next wave. @ogdegenonsol",
+        "🎉 $DEGEN now at ${price:.6f} with market cap ${mcap:.0f}K—community buzz is real! Ride the surge with us. @ogdegenonsol"
+    ]
+    idx = int(redis_client.get(PROMO_IDX_KEY) or 0) % len(templates)
+    redis_client.set(PROMO_IDX_KEY, (idx + 1) % len(templates))
     d = fetch_dexscreener_data(DEGEN_ADDRESS)
-    base = (
-        f"🚀 $DEGEN at ${d['price_usd']:.6f} | MC: ${d['market_cap']:.0f}K | "
-        f"24h {'🟢' if d['change_24h']>=0 else '🔴'} {d['change_24h']:+.2f}%—great entry under ATH!"
-    )
-    # Ensure minimum length of 240 chars
-    filler = " Join the Degen community now to ride the next wave of growth and seize this opportunity before it spikes even higher!"
-    tweet = base
+    tweet = templates[idx].format(price=d['price_usd'], mcap=d['market_cap'])
+    # Pad to 240 with subtle filler if needed
+    filler = " #Solana #Crypto"
     while len(tweet) < 240:
         tweet += filler
     return tweet[:240]
 
 async def degen_hourly_loop():
     while True:
-        tweet = compose_degen_promo()
-        x_client.create_tweet(text=tweet)
+        x_client.create_tweet(text=compose_degen_promo())
         logger.info('Posted hourly DEGEN update')
         await asyncio.sleep(3600)
 
-# Polling loop & startup\async def poll_mentions():
+# Polling loop & startup
+async def poll_mentions():
     last = redis_client.get(f"{REDIS_CACHE_PREFIX}last_tweet_id")
     since = int(last) if last else None
     res = x_client.get_users_mentions(
@@ -223,8 +230,10 @@ async def degen_hourly_loop():
     users = {u.id:u.username for u in res.includes.get('users',[])}
     for tw in reversed(res.data):
         evt = {'tweet_create_events':[{'id_str':str(tw.id),'text':tw.text,'user':{'screen_name':users.get(tw.author_id,'?')}}]}
-        try: await handle_mention(evt)
-        except Exception as e: logger.error(e)
+        try:
+            await handle_mention(evt)
+        except Exception as e:
+            logger.error(e)
         redis_client.set(f"{REDIS_CACHE_PREFIX}last_tweet_id",tw.id)
         redis_client.set(f"{REDIS_CACHE_PREFIX}last_mention",int(time.time()))
 
@@ -241,7 +250,9 @@ async def startup_event():
     asyncio.create_task(degen_hourly_loop())
 
 @app.get('/')
-async def root(): return {'message':'Degen Meme Bot is live.'}
+async def root():
+    return {'message':'Degen Meme Bot is live.'}
+
 @app.post('/test')
 async def test_bot(r: Request):
     body = await r.json()

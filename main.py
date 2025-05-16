@@ -23,18 +23,16 @@ required_vars = [
     "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET",
     "X_BEARER_TOKEN",
     "GROK_API_KEY",
-    "PERPLEXITY_API_KEY",  # Added Perplexity API key
+    "PERPLEXITY_API_KEY",
     "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"
 ]
-optional_vars = ["BIRDEYE_API_KEY"]  # Optional API keys
+optional_vars = ["BIRDEYE_API_KEY"]
 for v in required_vars:
     if not os.getenv(v):
         raise RuntimeError(f"Missing env var: {v}")
-        
 for v in optional_vars:
     if not os.getenv(v):
         logger.warning(f"Optional env var missing: {v}")
-
 
 # API endpoints
 GROK_URL = "https://api.x.ai/v1/chat/completions"

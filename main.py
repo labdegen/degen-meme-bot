@@ -153,19 +153,27 @@ async def handle_mention(ev: dict):
     return {'message':'ok'}
 
 async def degen_hourly_loop():
+    """
+    Every hour, fetch fresh Solana $DEGEN metrics and post a 4-sentence promo tweet.
+    Always uses the Solana contract address DEGEN_ADDR.
+    """
     while True:
         try:
-            # Always use Solana DEGEN_ADDR
+            # Explicitly fetch data using the Solana contract address
+            logger.info(f"Fetching Solana $DEGEN metrics for promo: {DEGEN_ADDR}")
             d = fetch_dexscreener_data(DEGEN_ADDR)
+            # Compose the promo text via Perplexity, without including the address
             system = (
-                "Write exactly 4 sentences: positive, engaging, community-focused tweet about $DEGEN on Solana, "
-                f"using price ${d['price_usd']:,.6f}, MC ${d['market_cap']:,.0f}K, Vol24 ${d['volume_usd']:,.1f}K."
+                "Dynamic promo copywriter: write exactly 4 sentences that are positive, engaging, and community-focused about $DEGEN on Solana, "
+                f"using the latest metrics: price=${d['price_usd']:,.6f}, market cap=${d['market_cap']:,.0f}K, 24h volume=${d['volume_usd']:,.1f}K." 
+                "Return only the tweet text, up to 280 characters."
             )
-            promo = ask_perplexity(system, "", max_tokens=200)
-            x_client.create_tweet(text=promo[:280])
-            logger.info("promo sent")
+            promo = ask_perplexity(system, "", max_tokens=180)
+            x_client.create_tweet(text=promo.strip()[:280])
+            logger.info("Hourly promo sent successfully.")
         except Exception as e:
             logger.error(f"promo error: {e}")
+        # Wait one hour before next promo
         await asyncio.sleep(3600)
 
 async def poll_loop():

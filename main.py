@@ -32,6 +32,7 @@ for v in required_vars:
 # API endpoints
 GROK_URL = "https://api.x.ai/v1/chat/completions"
 DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
+SEARCH_URL = "https://api.dexscreener.com/latest/dex/search?search={}"
 
 # Credentials
 API_KEY = os.getenv("X_API_KEY")
@@ -109,7 +110,8 @@ def fetch_data(addr: str) -> dict:
         'market_cap': float(data.get('marketCap', 0)),
         'change_1h':  float(data.get('priceChange', {}).get('h1', 0)),
         'change_24h': float(data.get('priceChange', {}).get('h24', 0)),
-        'link':       f"https://dexscreener.com/solana/{addr}"
+        'link':       f"https://dexscreener.com/solana/{addr}",
+        'address':    addr
     }
     db.setex(cache_key, 300, json.dumps(out))
     return out
@@ -121,17 +123,66 @@ def resolve_token(q: str) -> tuple:
     if ADDR_RE.match(s):
         return None, s
     try:
-        resp = requests.get(f"https://api.dexscreener.com/latest/dex/search?search={s}", timeout=10)
+        resp = requests.get(SEARCH_URL.format(s), timeout=10)
         resp.raise_for_status()
-        for item in resp.json():
+        results = resp.json()
+        for item in results:
             if item.get('chainId') == 'solana':
-                base = item['baseToken']
+                base = item.get('baseToken', {})
                 symbol = base.get('symbol')
                 addr = item.get('pairAddress') or base.get('address')
-                return symbol, addr
-    except:
-        pass
-    return None, None
+                if addr:
+                    return symbol, addr
+    except Exception as e:
+        logger.warning(f"Dexscreener search failed for {s}: {e}")
+
+    try:
+        prompt = f"Find the Solana token contract address for the symbol {s}. Return JSON {{'symbol': str, 'address': str}}."
+        out = ask_grok("You are a Solana token resolver.", prompt)
+        data = json.loads(out)
+        return data.get("symbol"), data.get("address")
+    except Exception as e:
+        logger.warning(f"Grok fallback for {s} failed: {e}")
+        return None, None
+
+def format_metrics(data: dict) -> str:
+    return f"🚀 {data['symbol']} | ${data['price_usd']:,.6f}\nMC ${data['market_cap']:,.0f} | Vol24 ${data['volume_usd']:,.0f}\n1h {'🟢' if data['change_1h'] >= 0 else '🔴'}{data['change_1h']:+.2f}% | 24h {'🟢' if data['change_24h'] >= 0 else '🔴'}{data['change_24h']:+.2f}%\n{data['link']}"
+
+def format_convo_reply(data: dict, question: str) -> str:
+    prompt = f"Here are the token metrics: Symbol: {data['symbol']}, Price: ${data['price_usd']:.6f}, Market Cap: ${data['market_cap']:,.0f}, 24h Change: {data['change_24h']:+.2f}%, Volume: ${data['volume_usd']:,.0f}. Based on that, answer this in 230 characters or less, ending with 'NFA': {question}"
+    return ask_grok("You are a crypto analyst replying to questions.", prompt, 120)
+
+@app.get("/")
+async def root():
+    return {"status": "Degen bot is live."}
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(poll_loop())
+
+async def poll_loop():
+    while True:
+        last = db.get(f"{REDIS_PREFIX}last_tweet_id")
+        since_id = int(last) if last else None
+        res = x_client.get_users_mentions(
+            id=BOT_ID,
+            since_id=since_id,
+            tweet_fields=['id', 'text', 'author_id'],
+            expansions=['author_id'],
+            user_fields=['username'],
+            max_results=10
+        )
+        if res and res.data:
+            users = {u.id: u.username for u in res.includes.get('users', [])}
+            for tw in reversed(res.data):
+                ev = {'tweet_create_events': [{'id_str': str(tw.id), 'text': tw.text, 'user': {'screen_name': users.get(tw.author_id, '?')}}]}
+                try:
+                    await handle_mention(ev)
+                except Exception as e:
+                    logger.error(f"Mention error: {e}")
+                db.set(f"{REDIS_PREFIX}last_tweet_id", tw.id)
+                db.set(f"{REDIS_PREFIX}last_mention", int(time.time()))
+        await asyncio.sleep(90)
 
 async def handle_mention(ev: dict):
     events = ev.get('tweet_create_events') or []
@@ -148,16 +199,9 @@ async def handle_mention(ev: dict):
         if addr:
             d = fetch_data(addr)
             if txt.strip() == token:
-                lines = [
-                    f"🚀 {d['symbol']} | ${d['price_usd']:,.6f}",
-                    f"MC ${d['market_cap']:,.0f}K | Vol24 ${d['volume_usd']:,.1f}K",
-                    f"1h {'🟢' if d['change_1h'] >= 0 else '🔴'}{d['change_1h']:+.2f}% | 24h {'🟢' if d['change_24h'] >= 0 else '🔴'}{d['change_24h']:+.2f}%",
-                    d['link']
-                ]
-                reply = "\n".join(lines)
+                reply = format_metrics(d)
             else:
-                prompt = f"You are a professional crypto market analyst. Given: {json.dumps(d)}, reply to an investor in <240 characters. Be clear, insightful, and do not mention Solana."
-                reply = ask_grok(prompt, txt, max_tokens=160)
+                reply = format_convo_reply(d, txt)
         else:
             reply = ask_grok("Professional analyst: reply under 240 characters clearly.", txt, max_tokens=160)
     else:
@@ -172,71 +216,3 @@ async def handle_mention(ev: dict):
             tweet = tweet.rsplit(' ', 1)[0] + '...'
     x_client.create_tweet(text=tweet, in_reply_to_tweet_id=int(tid))
     return {'message': 'ok'}
-
-async def degen_hourly_loop():
-    while True:
-        try:
-            d = fetch_data(DEGEN_ADDR)
-            card = [
-                f"🚀 {d['symbol']} | ${d['price_usd']:,.6f}",
-                f"MC ${d['market_cap']:,.0f}K | Vol24 ${d['volume_usd']:,.1f}K",
-                f"1h {'🟢' if d['change_1h'] >= 0 else '🔴'}{d['change_1h']:+.2f}% | 24h {'🟢' if d['change_24h'] >= 0 else '🔴'}{d['change_24h']:+.2f}%",
-                d['link']
-            ]
-            sys_msg = "You are a DEGEN community insider. Write a 2-sentence hourly update based on this data. Be enthusiastic but grounded. Do not mention Solana."
-            analysis = ask_grok(sys_msg, json.dumps(d), max_tokens=160)
-            tweet = "\n".join(card + [analysis])
-            if len(tweet) > 280:
-                tweet = tweet[:280]
-                if '.' in tweet:
-                    tweet = tweet.rsplit('.', 1)[0] + '.'
-                else:
-                    tweet = tweet.rsplit(' ', 1)[0] + '...'
-            try:
-                x_client.create_tweet(text=tweet)
-                logger.info("Hourly promo posted")
-            except:
-                x_api.update_status(tweet)
-        except Exception as e:
-            logger.error(f"Promo loop error: {e}")
-        await asyncio.sleep(3600)
-
-async def poll_loop():
-    while True:
-        last = db.get(f"{REDIS_PREFIX}last_tweet_id")
-        since_id = int(last) if last else None
-        res = x_client.get_users_mentions(
-            id=BOT_ID,
-            since_id=since_id,
-            tweet_fields=['id','text','author_id'],
-            expansions=['author_id'],
-            user_fields=['username'],
-            max_results=10
-        )
-        if res and res.data:
-            users = {u.id: u.username for u in res.includes.get('users', [])}
-            for tw in reversed(res.data):
-                ev = {'tweet_create_events': [{'id_str': str(tw.id), 'text': tw.text, 'user': {'screen_name': users.get(tw.author_id, '?')}}]}
-                try:
-                    await handle_mention(ev)
-                except Exception as e:
-                    logger.error(f"Mention error: {e}")
-                db.set(f"{REDIS_PREFIX}last_tweet_id", tw.id)
-                db.set(f"{REDIS_PREFIX}last_mention", int(time.time()))
-        lm = db.get(f"{REDIS_PREFIX}last_mention")
-        await asyncio.sleep(90 if lm and time.time() - int(lm) < 3600 else 1800)
-
-@app.on_event('startup')
-async def startup():
-    asyncio.create_task(poll_loop())
-    asyncio.create_task(degen_hourly_loop())
-
-@app.get('/')
-async def root():
-    return {'message': 'Degen Meme Bot is live.'}
-
-@app.post('/test')
-async def test_bot(r: Request):
-    data = await r.json()
-    ev = {'tweet_create_events': [{'id_str': '0', 'text': data.get('text', ''), 'user': {'screen_name': 'test'}}]}
-    return await handle_mention(ev)

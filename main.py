@@ -180,14 +180,21 @@ async def mention_loop():
                     db.ltrim(f"{REDIS_PREFIX}context_mentions", 0, 25)
                     db.sadd(f"{REDIS_PREFIX}replied_ids", str(tid))
 
-                    if 'raid' in txt.lower():
-                        prompt = f"Respond boldly to this call to raid: '{txt}'. Be edgy, confident, and always pro-$DEGEN. Mention @ogdegenonsol. End with NFA."
-                        grok_txt = ask_grok(prompt)
-                        img_list = glob.glob("raid_images/*.jpg")
-                        media = x_api.media_upload(choice(img_list)) if img_list else None
-                        x_client.create_tweet(text=grok_txt[:270], in_reply_to_tweet_id=tid,
-                                              media_ids=[media.media_id_string] if media else None)
-                        continue
+               if 'raid' in txt.lower():
+    prompt = (
+        f"Write a short, confident one-liner to hype $DEGEN. Be edgy, bold, and always pro-DEGEN. "
+        f"Mention @ogdegenonsol at the end. Do not say the word 'raid'. End with NFA."
+    )
+    grok_txt = ask_grok(prompt)
+    img_list = glob.glob("raid_images/*.jpg")
+    media = x_api.media_upload(choice(img_list)) if img_list else None
+    x_client.create_tweet(
+        text=grok_txt[:240],
+        in_reply_to_tweet_id=tid,
+        media_ids=[media.media_id_string] if media else None
+    )
+    continue
+
 
                     if txt.upper() == "DEX":
                         d = fetch_data(DEGEN_ADDR)
@@ -226,14 +233,15 @@ async def hourly_post_loop():
             db.lpush(f"{REDIS_PREFIX}context_hourly", prompt)
             db.ltrim(f"{REDIS_PREFIX}context_hourly", 0, 10)
             tweet = ask_grok(prompt)
-            final = f"{metrics}\n{tweet}"
-            last_post = db.get(f"{REDIS_PREFIX}last_hourly_post")
-            if final.strip() != last_post:
-                x_client.create_tweet(text=final[:380])
-                db.set(f"{REDIS_PREFIX}last_hourly_post", final.strip())
-                logger.info("Hourly post success")
-            else:
-                logger.info("Skipped duplicate hourly post.")
+           final = f"{metrics}\n\n{tweet}"
+last_post = db.get(f"{REDIS_PREFIX}last_hourly_post")
+if tweet not in last_post:
+    x_client.create_tweet(text=final[:580])
+    db.set(f"{REDIS_PREFIX}last_hourly_post", tweet)
+    logger.info("Hourly post success")
+else:
+    logger.info("Skipped duplicate hourly post.")
+
         except Exception as e:
             logger.error(f"Hourly post error: {e}")
         await asyncio.sleep(3600)

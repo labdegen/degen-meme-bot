@@ -31,10 +31,10 @@ for v in required_vars:
         raise RuntimeError(f"Missing env var: {v}")
 
 # API endpoints
-GROK_URL    = "https://api.x.ai/v1/chat/completions"
+GROK_URL       = "https://api.x.ai/v1/chat/completions"
 PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
-DEXS_URL    = "https://api.dexscreener.com/token-pairs/v1/solana/"
-SEARCH_URL  = "https://api.dexscreener.com/latest/dex/search?search={}"
+DEXS_URL       = "https://api.dexscreener.com/token-pairs/v1/solana/"
+SEARCH_URL     = "https://api.dexscreener.com/latest/dex/search?search={}"
 
 # Credentials
 API_KEY             = os.getenv("X_API_KEY")
@@ -76,17 +76,16 @@ DEGEN_ADDR   = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
 ADDR_RE      = re.compile(r'^[A-Za-z0-9]{43,44}$')
 
 # === RATE LIMIT GUARDS ===
-RATE_WINDOW     = 15 * 60    # 900 seconds
-MENTIONS_LIMIT  = 10         # calls to get_users_mentions per RATE_WINDOW
-TWEETS_LIMIT    = 50         # safe cap for tweets per RATE_WINDOW
+RATE_WINDOW     = 15 * 60  # 900 seconds
+MENTIONS_LIMIT  = 10       # lookups per window
+TWEETS_LIMIT    = 50       # tweets per window
 
 mentions_timestamps = deque()
 tweet_timestamps    = deque()
 
 async def safe_mention_lookup(fn, *args, **kwargs):
-    """Ensure no more than MENTIONS_LIMIT lookups per RATE_WINDOW."""
     now = time.time()
-    # purge old
+    # purge old timestamps
     while mentions_timestamps and now - mentions_timestamps[0] > RATE_WINDOW:
         mentions_timestamps.popleft()
     if len(mentions_timestamps) >= MENTIONS_LIMIT:
@@ -98,57 +97,143 @@ async def safe_mention_lookup(fn, *args, **kwargs):
     return res
 
 async def safe_tweet(text: str, **kwargs):
-    """Ensure no more than TWEETS_LIMIT tweets per RATE_WINDOW."""
     now = time.time()
-    # purge old
+    # purge old timestamps
     while tweet_timestamps and now - tweet_timestamps[0] > RATE_WINDOW:
         tweet_timestamps.popleft()
     if len(tweet_timestamps) >= TWEETS_LIMIT:
         wait = RATE_WINDOW - (now - tweet_timestamps[0]) + 1
         logger.warning(f"[RateGuard] Tweet limit reached; sleeping {wait:.0f}s")
         await asyncio.sleep(wait)
-
     try:
         resp = x_client.create_tweet(text=text, **kwargs)
     except tweepy.TooManyRequests as e:
-        reset_ts = int(e.response.headers.get("x-rate-limit-reset", time.time() + RATE_WINDOW))
+        reset_ts = int(e.response.headers.get('x-rate-limit-reset', time.time() + RATE_WINDOW))
         wait = max(0, reset_ts - time.time()) + 1
         logger.error(f"[RateGuard] 429 from Twitter; backing off {wait:.0f}s")
         await asyncio.sleep(wait)
         return await safe_tweet(text=text, **kwargs)
-
     tweet_timestamps.append(time.time())
     return resp
 
-# === YOUR EXISTING HELPERS (unchanged) ===
-
+# === HELPER FUNCTIONS ===
 def ask_grok(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str:
-    # … your existing implementation …
+    body = {
+        "model": "grok-3",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": user_prompt},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0.7
+    }
+    headers = {"Authorization": f"Bearer {GROK_KEY}", "Content-Type": "application/json"}
+    try:
+        r = requests.post(GROK_URL, json=body, headers=headers, timeout=35)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        logger.error(f"Grok fallback: {e}")
+        return "Stack more Degen."
+
 
 def ask_perplexity(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str:
-    # … your existing implementation …
+    payload = {
+        'model': 'sonar-pro',
+        'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user',   'content': user_prompt},
+        ],
+        'max_tokens': max_tokens,
+        'temperature': 1.0,
+        'top_p': 0.9,
+        'search_recency_filter': 'week'
+    }
+    headers = {'Authorization': f'Bearer {PERPLEXITY_KEY}', 'Content-Type': 'application/json'}
+    try:
+        resp = requests.post(PERPLEXITY_URL, json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        return resp.json()['choices'][0]['message']['content'].strip()
+    except Exception as e:
+        logger.warning(f"Perplexity fallback: {e}")
+        return ask_grok("You are a professional market analyst.", user_prompt, max_tokens)
+
 
 def fetch_data(addr: str) -> dict:
-    # … your existing implementation …
+    cache_key = f"{REDIS_PREFIX}dex:{addr}"
+    if cached := db.get(cache_key):
+        return json.loads(cached)
+    r = requests.get(f"{DEXS_URL}{addr}", timeout=10)
+    r.raise_for_status()
+    data = r.json()[0]
+    base = data.get('baseToken', {})
+    out = {
+        'symbol':     base.get('symbol'),
+        'price_usd':  float(data.get('priceUsd', 0)),
+        'volume_usd': float(data.get('volume', {}).get('h24', 0)),
+        'market_cap': float(data.get('marketCap', 0)),
+        'change_1h':  float(data.get('priceChange', {}).get('h1', 0)),
+        'change_24h': float(data.get('priceChange', {}).get('h24', 0)),
+        'link':       f"https://dexscreener.com/solana/{addr}",
+        'address':    addr
+    }
+    db.setex(cache_key, 300, json.dumps(out))
+    return out
+
 
 def resolve_token(q: str) -> tuple:
-    # … your existing implementation …
+    s = q.upper().lstrip('$')
+    if s == 'DEGEN':
+        return 'DEGEN', DEGEN_ADDR
+    if ADDR_RE.match(s):
+        return None, s
+    try:
+        resp = requests.get(SEARCH_URL.format(s), timeout=10)
+        resp.raise_for_status()
+        results = resp.json()
+        for item in results:
+            if item.get('chainId') == 'solana':
+                base = item.get('baseToken', {})
+                symbol = base.get('symbol')
+                addr = item.get('pairAddress') or base.get('address')
+                if addr:
+                    return symbol, addr
+    except Exception as e:
+        logger.warning(f"Dexscreener search failed for {s}: {e}")
+
+    try:
+        prompt = f"Find the Solana token contract address for the symbol {s}. Return JSON {{'symbol': str, 'address': str}}."
+        out = ask_perplexity("You are a Solana token resolver.", prompt)
+        data = json.loads(out)
+        return data.get("symbol"), data.get("address")
+    except Exception as e:
+        logger.warning(f"Perplexity + Grok fallback for {s} failed: {e}")
+        return None, None
+
 
 def format_metrics(data: dict) -> str:
-    # … your existing implementation …
+    return (f"🚀 {data['symbol']} | ${data['price_usd']:,.6f}\n"
+            f"MC ${data['market_cap']:,.0f} | Vol24 ${data['volume_usd']:,.0f}\n"
+            f"1h {'🟢' if data['change_1h']>=0 else '🔴'}{data['change_1h']:+.2f}% | "
+            f"24h {'🟢' if data['change_24h']>=0 else '🔴'}{data['change_24h']:+.2f}%\n"
+            f"{data['link']}")
+
 
 def format_convo_reply(data: dict, question: str) -> str:
-    # … your existing implementation …
+    prompt = (
+        f"Here are the token metrics: Symbol: {data['symbol']}, Price: ${data['price_usd']:.6f}, "
+        f"Market Cap: ${data['market_cap']:,.0f}, 24h Change: {data['change_24h']:+.2f}%, "
+        f"Volume: ${data['volume_usd']:,.0f}. Based on that, answer this in 230 characters or less, ending with 'NFA': {question}"
+    )
+    return ask_grok("You are a crypto analyst replying to questions.", prompt, max_tokens=120)
 
 # === FASTAPI ENDPOINTS & LOOPS ===
-
 @app.get("/")
 async def root():
     return {"status": "Degen bot is live."}
 
 @app.on_event("startup")
 async def startup_event():
-    # delay initial polling & promo to avoid t=0 blasts
     await asyncio.sleep(60)
     asyncio.create_task(poll_loop())
     await asyncio.sleep(3600)
@@ -156,10 +241,9 @@ async def startup_event():
 
 async def poll_loop():
     while True:
-        last    = db.get(f"{REDIS_PREFIX}last_tweet_id")
+        last     = db.get(f"{REDIS_PREFIX}last_tweet_id")
         since_id = int(last) if last else None
 
-        # use safe lookup
         res = await safe_mention_lookup(
             x_client.get_users_mentions,
             id=BOT_ID,
@@ -174,9 +258,9 @@ async def poll_loop():
             users = {u.id: u.username for u in res.includes.get('users', [])}
             for tw in reversed(res.data):
                 ev = {'tweet_create_events': [{
-                    'id_str': str(tw.id),
-                    'text': tw.text,
-                    'user': {'screen_name': users.get(tw.author_id, '?')}
+                    'id_str':       str(tw.id),
+                    'text':         tw.text,
+                    'user':         {'screen_name': users.get(tw.author_id, '?')}
                 }]}
                 try:
                     await handle_mention(ev)
@@ -193,8 +277,7 @@ async def hourly_post_loop():
             d       = fetch_data(DEGEN_ADDR)
             card    = format_metrics(d)
             context = ask_grok(
-                "You're a Degen community member summarizing recent metrics. "
-                "Make it casual, grounded, and complete within 2 sentences.",
+                "You're a Degen community member summarizing recent metrics. Make it casual, grounded, and complete within 2 sentences.",
                 json.dumps(d),
                 max_tokens=160
             )
@@ -212,32 +295,41 @@ async def hourly_post_loop():
 
 async def handle_mention(ev: dict):
     events = ev.get('tweet_create_events') or []
-    if not events or not isinstance(events, list) or not events[0].get("text"):
+    if not events or not isinstance(events, list) or not events[0].get('text'):
         logger.warning("Skipping invalid or empty mention event")
-        return {"message":"no valid mention"}
+        return {'message':'no valid mention'}
 
     txt = events[0]['text'].replace('@askdegen','').strip()
     tid = events[0]['id_str']
 
-    # build reply
     token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
     if token:
         sym, addr = resolve_token(token)
         if addr:
             d = fetch_data(addr)
-            reply = format_metrics(d) if txt.strip()==token else format_convo_reply(d, txt)
+            if txt.strip() == token:
+                reply = format_metrics(d)
+            else:
+                reply = format_convo_reply(d, txt)
         else:
             reply = ask_perplexity(
                 "You are a crypto researcher. Answer this tweet in under 240 characters clearly.",
-                txt, max_tokens=160
+                txt,
+                max_tokens=160
             )
     else:
-        reply = ask_grok("Professional crypto professor: concise analytical response.", txt, max_tokens=160)
+        reply = ask_grok(
+            "Professional crypto professor: concise analytical response.",
+            txt,
+            max_tokens=160
+        )
 
-    # trim to 240
     tweet = reply.strip()
-    if len(tweet)>240:
-        tweet = tweet[:240].rsplit('.',1)[0]+'.' if '.' in tweet else tweet[:240].rsplit(' ',1)[0]+'...'
+    if len(tweet) > 240:
+        if '.' in tweet:
+            tweet = tweet[:240].rsplit('.',1)[0] + '.'
+        else:
+            tweet = tweet[:240].rsplit(' ',1)[0] + '...'
 
     await safe_tweet(text=tweet, in_reply_to_tweet_id=int(tid))
     return {'message':'ok'}

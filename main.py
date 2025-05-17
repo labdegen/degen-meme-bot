@@ -140,7 +140,7 @@ def ask_grok(prompt):
             "model": "grok-3",
             "messages": [
                 {"role": "system", "content": "You're a bold, witty, aggressive crypto community voice."},
-                {"role": "user", "content": prompt + DEGEN_KNOWLEDGE + "\nEnd with NFA."}
+                {"role": "user", "content": prompt + "\n" + DEGEN_KNOWLEDGE + "\nEnd with NFA."}
             ],
             "max_tokens": 180,
             "temperature": 0.95
@@ -157,28 +157,34 @@ def ask_grok(prompt):
         logger.error(f"Grok error: {e}")
         return "$DEGEN. NFA."
 
-# === Event Loop ===
 async def hourly_post_loop():
     while True:
         try:
             d = fetch_data(DEGEN_ADDR)
-            if not d: continue
+            if not d:
+                await asyncio.sleep(60)
+                continue
             metrics = format_metrics(d)
-            prompt = f"Here are the latest metrics for $DEGEN: {json.dumps(d)}"
+            prompt = f"Write a fresh new take using this data: {json.dumps(d)}"
             db.lpush(f"{REDIS_PREFIX}context_hourly", prompt)
             db.ltrim(f"{REDIS_PREFIX}context_hourly", 0, 10)
             tweet = ask_grok(prompt)
             final = f"{metrics}\n{tweet}"
-            x_client.create_tweet(text=final[:380])
-            logger.info("Hourly post success")
+            last_post = db.get(f"{REDIS_PREFIX}last_hourly_post")
+            if final.strip() != last_post:
+                x_client.create_tweet(text=final[:380])
+                db.set(f"{REDIS_PREFIX}last_hourly_post", final.strip())
+                logger.info("Hourly post success")
+            else:
+                logger.info("Skipped duplicate hourly post.")
         except Exception as e:
             logger.error(f"Hourly post error: {e}")
         await asyncio.sleep(3600)
 
 async def mention_loop():
-    last_id = db.get(f"{REDIS_PREFIX}last_mention_id")
     while True:
         try:
+            last_id = db.get(f"{REDIS_PREFIX}last_mention_id")
             res = x_client.get_users_mentions(
                 id=BOT_ID,
                 since_id=last_id,
@@ -190,10 +196,13 @@ async def mention_loop():
             if res.data:
                 for tweet in reversed(res.data):
                     tid = tweet.id
+                    if db.sismember(f"{REDIS_PREFIX}replied_ids", str(tid)):
+                        continue
                     txt = tweet.text.replace('@askdegen', '').strip()
                     db.set(f"{REDIS_PREFIX}last_mention_id", tid)
                     db.lpush(f"{REDIS_PREFIX}context_mentions", txt)
                     db.ltrim(f"{REDIS_PREFIX}context_mentions", 0, 25)
+                    db.sadd(f"{REDIS_PREFIX}replied_ids", str(tid))
 
                     if 'RAID' in txt.upper():
                         grok_txt = ask_grok("Generate a bold call to raid $DEGEN. Tag @ogdegenonsol.")
@@ -213,7 +222,7 @@ async def mention_loop():
                             sym, addr = resolve_token(token)
                             if addr:
                                 d = fetch_data(addr)
-                                msg = format_metrics(d)
+                                msg = format_metrics(d) if sym == 'DEGEN' else ask_grok(f"Give serious analysis of token {sym} based on these stats: {json.dumps(d)}")
                             else:
                                 msg = ask_grok(txt)
                         else:

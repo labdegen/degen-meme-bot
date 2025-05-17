@@ -84,6 +84,7 @@ TWEETS_LIMIT = 50
 mentions_timestamps = deque()
 tweet_timestamps = deque()
 
+# === Functions ===
 def resolve_token(q):
     s = q.upper().lstrip('$')
     if s == 'DEGEN':
@@ -133,114 +134,92 @@ def format_metrics(data):
 
 def ask_grok(prompt):
     try:
+        history_key = f"{REDIS_PREFIX}grok_history"
+        past_prompts = db.lrange(history_key, 0, -1)
         body = {
             "model": "grok-3",
             "messages": [
-                {"role": "system", "content": "You're a bold, witty, aggressive crypto community voice."},
+                {"role": "system", "content": "You're a bold, witty, aggressive crypto community voice. Highlight one item from the degen knowledge."},
                 {"role": "user", "content": prompt + DEGEN_KNOWLEDGE + "\nEnd with NFA."}
             ],
-            "max_tokens": 180,
-            "temperature": 0.9
+            "max_tokens": 280,
+            "temperature": 0.95
         }
         headers = {"Authorization": f"Bearer {GROK_KEY}", "Content-Type": "application/json"}
         r = requests.post(GROK_URL, json=body, headers=headers)
         r.raise_for_status()
-        return r.json()['choices'][0]['message']['content'].strip()
+        reply = r.json()['choices'][0]['message']['content'].strip()
+        if reply not in past_prompts:
+            db.lpush(history_key, reply)
+            db.ltrim(history_key, 0, 25)
+        return reply
     except Exception as e:
         logger.error(f"Grok error: {e}")
         return "$DEGEN. NFA."
 
-async def safe_tweet(text, media_id=None, **kwargs):
-    now = time.time()
-    while tweet_timestamps and now - tweet_timestamps[0] > RATE_WINDOW:
-        tweet_timestamps.popleft()
-    if len(tweet_timestamps) >= TWEETS_LIMIT:
-        wait = RATE_WINDOW - (now - tweet_timestamps[0]) + 1
-        logger.warning(f"[RateGuard] Tweet limit hit; sleeping {wait:.0f}s")
-        await asyncio.sleep(wait)
-    try:
-        if media_id:
-            return x_client.create_tweet(text=text, media_ids=[media_id], **kwargs)
-        return x_client.create_tweet(text=text, **kwargs)
-    except tweepy.TooManyRequests as e:
-        reset = int(e.response.headers.get("x-rate-limit-reset", time.time() + RATE_WINDOW))
-        await asyncio.sleep(max(0, reset - time.time()) + 1)
-        return await safe_tweet(text, media_id=media_id, **kwargs)
-    tweet_timestamps.append(time.time())
-
-async def poll_loop():
-    while True:
-        try:
-            last_id = db.get("last_mention_id")
-            mentions = x_client.get_users_mentions(
-                id=BOT_ID,
-                since_id=last_id,
-                tweet_fields=["id", "text", "author_id", "in_reply_to_user_id"],
-                expansions=["author_id"],
-                user_fields=["username"],
-                max_results=10
-            )
-            if mentions and mentions.data:
-                for tw in reversed(mentions.data):
-                    if str(tw.in_reply_to_user_id) != str(BOT_ID):
-                        continue
-                    txt = tw.text.strip()
-                    tid = tw.id
-                    txt_lower = txt.lower()
-                    
-                    if "raid" in txt_lower:
-                        text = ask_grok("Start a bold tweet about buying $DEGEN and tag @ogdegenonsol")
-                        images = glob.glob("raid_images/*.jpg")
-                        if images:
-                            img = choice(images)
-                            media = x_api.media_upload(img)
-                            await safe_tweet(text=text, media_id=media.media_id_string)
-                        else:
-                            await safe_tweet(text=text)
-                    elif txt_lower == "dex":
-                        reply = format_metrics(fetch_data(DEGEN_ADDR))
-                        await safe_tweet(text=reply.strip(), in_reply_to_tweet_id=tid)
-                    elif txt_lower == "ca":
-                        reply = f"Contract Address: {DEGEN_ADDR}"
-                        await safe_tweet(text=reply.strip(), in_reply_to_tweet_id=tid)
-                    else:
-                        token = next((w for w in txt.split() if w.startswith("$") or ADDR_RE.match(w)), None)
-                        if token:
-                            sym, addr = resolve_token(token)
-                            if addr:
-                                d = fetch_data(addr)
-                                reply = format_metrics(d)
-                            else:
-                                reply = "Token not found."
-                            await safe_tweet(text=reply.strip(), in_reply_to_tweet_id=tid)
-                        else:
-                            reply = ask_grok(txt)
-                            await safe_tweet(text=reply.strip(), in_reply_to_tweet_id=tid)
-                    db.set("last_mention_id", tid)
-        except Exception as e:
-            logger.error(f"Poll loop error: {e}")
-        await asyncio.sleep(110)
-
+# === Event Loop ===
 async def hourly_post_loop():
     while True:
         try:
-            d = fetch_data()
-            card = format_metrics(d)
-            context = ask_grok("Write a 1-sentence bullish summary of these metrics:")
-            tweet = f"{card}\n{context}"
-            if len(tweet) > 680:
-                tweet = tweet[:680].rsplit('.', 1)[0] + '.'
-            await safe_tweet(text=tweet)
+            d = fetch_data(DEGEN_ADDR)
+            metrics = format_metrics(d)
+            tweet = ask_grok(f"Here are the latest metrics for $DEGEN: {json.dumps(d)}")
+            final = f"{metrics}\n{tweet}"
+            x_client.create_tweet(text=final[:380])
             logger.info("Hourly post success")
         except Exception as e:
             logger.error(f"Hourly post error: {e}")
         await asyncio.sleep(3600)
 
-async def main():
-    await asyncio.gather(
-        poll_loop(),
-        hourly_post_loop()
-    )
+async def mention_loop():
+    last_id = db.get(f"{REDIS_PREFIX}last_mention_id")
+    while True:
+        try:
+            res = x_client.get_users_mentions(
+                id=BOT_ID,
+                since_id=last_id,
+                tweet_fields=['id', 'text', 'author_id'],
+                expansions=['author_id'],
+                user_fields=['username'],
+                max_results=10
+            )
+            if res.data:
+                for tweet in reversed(res.data):
+                    tid = tweet.id
+                    txt = tweet.text.replace('@askdegen', '').strip()
+                    db.set(f"{REDIS_PREFIX}last_mention_id", tid)
+
+                    if 'RAID' in txt.upper():
+                        grok_txt = ask_grok("Generate a bold call to raid $DEGEN. Tag @ogdegenonsol.")
+                        img_list = glob.glob("memes/*.jpg")
+                        media = x_api.media_upload(choice(img_list)) if img_list else None
+                        x_client.create_tweet(text=grok_txt, media_ids=[media.media_id_string] if media else None)
+                        continue
+
+                    if txt.upper() == "DEX":
+                        d = fetch_data(DEGEN_ADDR)
+                        msg = format_metrics(d)
+                    elif txt.upper() == "CA":
+                        msg = f"Contract Address: {DEGEN_ADDR}"
+                    else:
+                        token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
+                        if token:
+                            sym, addr = resolve_token(token)
+                            if addr:
+                                d = fetch_data(addr)
+                                msg = format_metrics(d)
+                            else:
+                                msg = ask_grok(txt)
+                        else:
+                            msg = ask_grok(txt)
+
+                    x_client.create_tweet(text=msg[:240], in_reply_to_tweet_id=tid)
+        except Exception as e:
+            logger.error(f"Poll loop error: {e}")
+        await asyncio.sleep(110)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(asyncio.gather(
+        mention_loop(),
+        hourly_post_loop()
+    ))

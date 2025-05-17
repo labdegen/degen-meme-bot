@@ -139,10 +139,10 @@ def ask_grok(prompt):
         body = {
             "model": "grok-3",
             "messages": [
-                {"role": "system", "content": "You're a bold, witty, aggressive crypto community voice. Highlight one item from the degen knowledge."},
+                {"role": "system", "content": "You're a bold, witty, aggressive crypto community voice."},
                 {"role": "user", "content": prompt + DEGEN_KNOWLEDGE + "\nEnd with NFA."}
             ],
-            "max_tokens": 280,
+            "max_tokens": 180,
             "temperature": 0.95
         }
         headers = {"Authorization": f"Bearer {GROK_KEY}", "Content-Type": "application/json"}
@@ -163,7 +163,10 @@ async def hourly_post_loop():
         try:
             d = fetch_data(DEGEN_ADDR)
             metrics = format_metrics(d)
-            tweet = ask_grok(f"Here are the latest metrics for $DEGEN: {json.dumps(d)}")
+            prompt = f"Here are the latest metrics for $DEGEN: {json.dumps(d)}"
+            db.lpush(f"{REDIS_PREFIX}context_hourly", prompt)
+            db.ltrim(f"{REDIS_PREFIX}context_hourly", 0, 10)
+            tweet = ask_grok(prompt)
             final = f"{metrics}\n{tweet}"
             x_client.create_tweet(text=final[:380])
             logger.info("Hourly post success")
@@ -188,6 +191,8 @@ async def mention_loop():
                     tid = tweet.id
                     txt = tweet.text.replace('@askdegen', '').strip()
                     db.set(f"{REDIS_PREFIX}last_mention_id", tid)
+                    db.lpush(f"{REDIS_PREFIX}context_mentions", txt)
+                    db.ltrim(f"{REDIS_PREFIX}context_mentions", 0, 25)
 
                     if 'RAID' in txt.upper():
                         grok_txt = ask_grok("Generate a bold call to raid $DEGEN. Tag @ogdegenonsol.")
@@ -218,8 +223,11 @@ async def mention_loop():
             logger.error(f"Poll loop error: {e}")
         await asyncio.sleep(110)
 
-if __name__ == "__main__":
-    asyncio.run(asyncio.gather(
+async def main():
+    await asyncio.gather(
         mention_loop(),
         hourly_post_loop()
-    ))
+    )
+
+if __name__ == "__main__":
+    asyncio.run(main())

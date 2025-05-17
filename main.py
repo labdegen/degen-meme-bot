@@ -10,6 +10,7 @@ import asyncio
 import time
 from collections import deque
 from random import choice
+import glob
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -101,7 +102,7 @@ async def safe_mention_lookup(fn, *args, **kwargs):
     mentions_timestamps.append(time.time())
     return res
 
-async def safe_tweet(text, **kwargs):
+async def safe_tweet(text, media_id=None, **kwargs):
     now = time.time()
     while tweet_timestamps and now - tweet_timestamps[0] > RATE_WINDOW:
         tweet_timestamps.popleft()
@@ -110,167 +111,44 @@ async def safe_tweet(text, **kwargs):
         logger.warning(f"[RateGuard] Tweet limit hit; sleeping {wait:.0f}s")
         await asyncio.sleep(wait)
     try:
+        if media_id:
+            return x_client.create_tweet(text=text, media_ids=[media_id], **kwargs)
         return x_client.create_tweet(text=text, **kwargs)
     except tweepy.TooManyRequests as e:
         reset = int(e.response.headers.get("x-rate-limit-reset", time.time() + RATE_WINDOW))
         await asyncio.sleep(max(0, reset - time.time()) + 1)
-        return await safe_tweet(text, **kwargs)
+        return await safe_tweet(text, media_id=media_id, **kwargs)
     tweet_timestamps.append(time.time())
 
-def ask_grok(system_prompt, user_prompt, max_tokens=200):
-    body = {
-        "model": "grok-3",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "max_tokens": max_tokens,
-        "temperature": 0.7
-    }
-    headers = {"Authorization": f"Bearer {GROK_KEY}", "Content-Type": "application/json"}
+def is_direct_mention(tweet):
+    return not tweet.in_reply_to_user_id or tweet.in_reply_to_user_id == BOT_ID
+
+async def handle_raid():
     try:
-        r = requests.post(GROK_URL, json=body, headers=headers, timeout=35)
+        prompt = f"You're a bold, witty, aggressive crypto community voice. Using the following info, craft a powerful tweet encouraging people to buy $DEGEN and tag @ogdegenonsol. End with NFA.\n\n{DEGEN_KNOWLEDGE}"
+        body = {
+            "model": "grok-3",
+            "messages": [
+                {"role": "system", "content": "You are a bold crypto hype beast."},
+                {"role": "user", "content": prompt}
+            ],
+            "max_tokens": 180,
+            "temperature": 0.9
+        }
+        headers = {"Authorization": f"Bearer {GROK_KEY}", "Content-Type": "application/json"}
+        r = requests.post(GROK_URL, json=body, headers=headers)
         r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"].strip()
+        content = r.json()['choices'][0]['message']['content'].strip()
+
+        images = glob.glob("raid_images/*.jpg")
+        if not images:
+            await safe_tweet(text=content)
+            return
+        image_path = choice(images)
+        media = x_api.media_upload(image_path)
+        await safe_tweet(text=content, media_id=media.media_id_string)
     except Exception as e:
-        logger.error(f"Grok fallback: {e}")
-        return "Stack more Degen."
-
-def ask_perplexity(system_prompt, user_prompt, max_tokens=200):
-    payload = {
-        "model": "sonar-pro",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "max_tokens": max_tokens,
-        "temperature": 1.0,
-        "top_p": 0.9,
-        "search_recency_filter": "week"
-    }
-    headers = {"Authorization": f"Bearer {PERPLEXITY_KEY}", "Content-Type": "application/json"}
-    try:
-        resp = requests.post(PERPLEXITY_URL, json=payload, headers=headers, timeout=30)
-        resp.raise_for_status()
-        return resp.json()['choices'][0]['message']['content'].strip()
-    except Exception as e:
-        logger.warning(f"Perplexity fallback: {e}")
-        return ask_grok("You are a professional market analyst.", user_prompt, max_tokens)
-
-def fetch_data(addr):
-    key = f"{REDIS_PREFIX}dex:{addr}"
-    if cached := db.get(key):
-        return json.loads(cached)
-    r = requests.get(f"{DEXS_URL}{addr}", timeout=10)
-    r.raise_for_status()
-    data = r.json()[0]
-    base = data.get('baseToken', {})
-    out = {
-        'symbol': base.get('symbol'),
-        'price_usd': float(data.get('priceUsd', 0)),
-        'volume_usd': float(data.get('volume', {}).get('h24', 0)),
-        'market_cap': float(data.get('marketCap', 0)),
-        'change_1h': float(data.get('priceChange', {}).get('h1', 0)),
-        'change_24h': float(data.get('priceChange', {}).get('h24', 0)),
-        'link': f"https://dexscreener.com/solana/{addr}",
-        'logo': base.get('logoURI'),
-        'address': addr
-    }
-    db.setex(key, 300, json.dumps(out))
-    return out
-
-def resolve_token(q):
-    s = q.upper().lstrip('$')
-    if s == 'DEGEN':
-        return 'DEGEN', DEGEN_ADDR
-    if ADDR_RE.match(s):
-        return None, s
-    try:
-        resp = requests.get(SEARCH_URL.format(s), timeout=10)
-        resp.raise_for_status()
-        for item in resp.json():
-            if item.get('chainId') == 'solana':
-                base = item.get('baseToken', {})
-                addr = item.get('pairAddress') or base.get('address')
-                if addr:
-                    return base.get('symbol'), addr
-    except:
-        pass
-    try:
-        prompt = f"Find the Solana token contract address for the symbol {s}. Return JSON {{'symbol': str, 'address': str}}."
-        out = ask_perplexity("You are a Solana token resolver.", prompt)
-        data = json.loads(out)
-        return data.get("symbol"), data.get("address")
-    except:
-        return None, None
-
-def format_metrics(data):
-    return (
-        f"🚀 {data['symbol']} | ${data['price_usd']:,.6f}\n"
-        f"MC ${data['market_cap']:,.0f} | Vol24 ${data['volume_usd']:,.0f}\n"
-        f"1h {'🟢' if data['change_1h'] >= 0 else '🔴'}{data['change_1h']:+.2f}% | "
-        f"24h {'🟢' if data['change_24h'] >= 0 else '🔴'}{data['change_24h']:+.2f}%\n{data['link']}"
-    )
-
-def format_convo_reply(data, question):
-    if "$DEGEN" in question.upper():
-        return (
-            f"$DEGEN is 100% community-driven and building fast. Video game, PFP generator, profit tools. "
-            f"Currently at ${data['price_usd']:,.6f} with MC ${data['market_cap']:,.0f}. Bullish. NFA."
-        )
-    prompt = f"{DEGEN_KNOWLEDGE}\n\nUser asked: {question}\nMetrics: MC ${data['market_cap']:,.0f}, Price ${data['price_usd']:,.6f}, Change 24h {data['change_24h']:+.2f}%."
-    return ask_grok("You are a crypto promoter for $DEGEN.", prompt, 160)
-
-async def handle_mention(ev):
-    events = ev.get('tweet_create_events') or []
-    if not events or not events[0].get('text'):
-        return {'message': 'no valid mention'}
-    txt = events[0]['text'].replace('@askdegen', '').strip()
-    tid = events[0]['id_str']
-    txt_up = txt.upper()
-
-    # Like if tweet contains $DEGEN
-    if "$DEGEN" in txt_up:
-        try:
-            x_api.create_favorite(id=int(tid))
-        except Exception as e:
-            logger.warning(f"Like error: {e}")
-
-    # Handle RAID
-    if "RAID" in txt_up:
-        try:
-            files = os.listdir("raid_images")
-            path = f"raid_images/{choice(files)}"
-            media = x_api.media_upload(path)
-            tweet = "$DEGEN raid in full effect. Buy pressure building. Tagging @ogdegenonsol. NFA."
-            await safe_tweet(text=tweet, media_ids=[media.media_id_string], in_reply_to_tweet_id=int(tid))
-            return {'message': 'raid'}
-        except Exception as e:
-            logger.error(f"Raid error: {e}")
-
-    # Handle CA/DEX
-    if txt_up == 'DEX':
-        d = fetch_data(DEGEN_ADDR)
-        reply = f"{format_metrics(d)}\n{d.get('logo', '')}"
-    elif txt_up == 'CA':
-        reply = f"Contract Address: {DEGEN_ADDR}"
-    else:
-        token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
-        if token:
-            sym, addr = resolve_token(token)
-            if addr:
-                d = fetch_data(addr)
-                reply = format_metrics(d) if token.strip() == txt else format_convo_reply(d, txt)
-            else:
-                reply = ask_perplexity("You are a crypto researcher.", txt, 160)
-        else:
-            reply = ask_grok("Crypto professor. Concise analysis.", txt, 160)
-
-    tweet = reply.strip()
-    if len(tweet) > 240:
-        tweet = tweet[:240].rsplit('.', 1)[0] + '.'
-    await safe_tweet(text=tweet, in_reply_to_tweet_id=int(tid))
-    return {'message': 'ok'}
+        logger.error(f"Raid error: {e}")
 
 async def poll_loop():
     while True:
@@ -280,7 +158,7 @@ async def poll_loop():
             x_client.get_users_mentions,
             id=BOT_ID,
             since_id=since_id,
-            tweet_fields=['id', 'text', 'author_id'],
+            tweet_fields=['id', 'text', 'author_id', 'in_reply_to_user_id'],
             expansions=['author_id'],
             user_fields=['username'],
             max_results=10
@@ -288,35 +166,14 @@ async def poll_loop():
         if res and res.data:
             users = {u.id: u.username for u in res.includes.get('users', [])}
             for tw in reversed(res.data):
-                ev = {'tweet_create_events': [{'id_str': str(tw.id), 'text': tw.text, 'user': {'screen_name': users.get(tw.author_id, '?')}}]}
-                try:
-                    await handle_mention(ev)
-                except Exception as e:
-                    logger.error(f"Mention error: {e}")
+                if not is_direct_mention(tw):
+                    continue
+                if 'raid' in tw.text.lower():
+                    await handle_raid()
                 db.set(f"{REDIS_PREFIX}last_tweet_id", tw.id)
         await asyncio.sleep(110)
 
-async def hourly_post_loop():
-    while True:
-        try:
-            d = fetch_data(DEGEN_ADDR)
-            card = format_metrics(d)
-            context = ask_grok("You're a Degen community member summarizing recent metrics.", json.dumps(d), 160)
-            tweet = f"{card}\n{context}"
-            if len(tweet) > 380:
-                tweet = tweet[:380].rsplit('.', 1)[0] + '.'
-            await safe_tweet(text=tweet)
-            logger.info("Hourly promo posted")
-        except Exception as e:
-            logger.error(f"Promo error: {e}")
-        await asyncio.sleep(3600)
-
-async def main():
-    await asyncio.gather(
-        poll_loop(),
-        hourly_post_loop()
-    )
-
 if __name__ == "__main__":
-    asyncio.run(main())
-
+    asyncio.run(asyncio.gather(
+        poll_loop()
+    ))

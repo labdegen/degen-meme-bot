@@ -311,8 +311,12 @@ async def hourly_post_loop():
             logger.error(f"Promo error: {e}")
         await asyncio.sleep(3600)
 
-if __name__ == "__main__":
-    asyncio.run(asyncio.gather(
+async def main():
+    await asyncio.gather(
         poll_loop(),
         hourly_post_loop()
-    ))
+    )
+
+if __name__ == "__main__":
+    asyncio.run(main())
+

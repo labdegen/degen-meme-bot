@@ -142,7 +142,7 @@ def ask_grok(prompt):
                 {"role": "system", "content": "You're a bold, witty, aggressive crypto community voice."},
                 {"role": "user", "content": prompt + "\n" + DEGEN_KNOWLEDGE + "\nEnd with NFA."}
             ],
-            "max_tokens": 280,
+            "max_tokens": 180,
             "temperature": 0.95
         }
         headers = {"Authorization": f"Bearer {GROK_KEY}", "Content-Type": "application/json"}
@@ -156,30 +156,6 @@ def ask_grok(prompt):
     except Exception as e:
         logger.error(f"Grok error: {e}")
         return "$DEGEN. NFA."
-
-async def hourly_post_loop():
-    while True:
-        try:
-            d = fetch_data(DEGEN_ADDR)
-            if not d:
-                await asyncio.sleep(60)
-                continue
-            metrics = format_metrics(d)
-            prompt = f"Write a fresh new take using this data: {json.dumps(d)}"
-            db.lpush(f"{REDIS_PREFIX}context_hourly", prompt)
-            db.ltrim(f"{REDIS_PREFIX}context_hourly", 0, 10)
-            tweet = ask_grok(prompt)
-            final = f"{metrics}\n{tweet}"
-            last_post = db.get(f"{REDIS_PREFIX}last_hourly_post")
-            if final.strip() != last_post:
-                x_client.create_tweet(text=final[:580])
-                db.set(f"{REDIS_PREFIX}last_hourly_post", final.strip())
-                logger.info("Hourly post success")
-            else:
-                logger.info("Skipped duplicate hourly post.")
-        except Exception as e:
-            logger.error(f"Hourly post error: {e}")
-        await asyncio.sleep(3600)
 
 async def mention_loop():
     while True:
@@ -204,18 +180,14 @@ async def mention_loop():
                     db.ltrim(f"{REDIS_PREFIX}context_mentions", 0, 25)
                     db.sadd(f"{REDIS_PREFIX}replied_ids", str(tid))
 
-                if 'raid' in txt.lower():
-    prompt = f"Respond boldly to this call to raid: '{txt}'. Be edgy, confident, and always pro-$DEGEN. Mention @ogdegenonsol. End with NFA."
-    grok_txt = ask_grok(prompt)
-    img_list = glob.glob("raid_images/*.jpg")
-    media = x_api.media_upload(choice(img_list)) if img_list else None
-    x_client.create_tweet(
-        text=grok_txt[:270],
-        in_reply_to_tweet_id=tid,
-        media_ids=[media.media_id_string] if media else None
-    )
-    continue
-
+                    if 'raid' in txt.lower():
+                        prompt = f"Respond boldly to this call to raid: '{txt}'. Be edgy, confident, and always pro-$DEGEN. Mention @ogdegenonsol. End with NFA."
+                        grok_txt = ask_grok(prompt)
+                        img_list = glob.glob("raid_images/*.jpg")
+                        media = x_api.media_upload(choice(img_list)) if img_list else None
+                        x_client.create_tweet(text=grok_txt[:270], in_reply_to_tweet_id=tid,
+                                              media_ids=[media.media_id_string] if media else None)
+                        continue
 
                     if txt.upper() == "DEX":
                         d = fetch_data(DEGEN_ADDR)
@@ -228,7 +200,10 @@ async def mention_loop():
                             sym, addr = resolve_token(token)
                             if addr:
                                 d = fetch_data(addr)
-                                msg = format_metrics(d) if sym == 'DEGEN' else ask_grok(f"Give serious analysis of token {sym} based on these stats: {json.dumps(d)}")
+                                if sym == 'DEGEN':
+                                    msg = ask_grok(f"Shill $DEGEN hard using: {json.dumps(d)}")
+                                else:
+                                    msg = ask_grok(f"Give serious analysis of token {sym} based on these stats: {json.dumps(d)}")
                             else:
                                 msg = ask_grok(txt)
                         else:
@@ -238,6 +213,30 @@ async def mention_loop():
         except Exception as e:
             logger.error(f"Poll loop error: {e}")
         await asyncio.sleep(110)
+
+async def hourly_post_loop():
+    while True:
+        try:
+            d = fetch_data(DEGEN_ADDR)
+            if not d:
+                await asyncio.sleep(60)
+                continue
+            metrics = format_metrics(d)
+            prompt = f"Write a fresh new take using this data: {json.dumps(d)}"
+            db.lpush(f"{REDIS_PREFIX}context_hourly", prompt)
+            db.ltrim(f"{REDIS_PREFIX}context_hourly", 0, 10)
+            tweet = ask_grok(prompt)
+            final = f"{metrics}\n{tweet}"
+            last_post = db.get(f"{REDIS_PREFIX}last_hourly_post")
+            if final.strip() != last_post:
+                x_client.create_tweet(text=final[:380])
+                db.set(f"{REDIS_PREFIX}last_hourly_post", final.strip())
+                logger.info("Hourly post success")
+            else:
+                logger.info("Skipped duplicate hourly post.")
+        except Exception as e:
+            logger.error(f"Hourly post error: {e}")
+        await asyncio.sleep(3600)
 
 async def main():
     await asyncio.gather(

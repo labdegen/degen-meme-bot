@@ -139,11 +139,11 @@ def ask_grok(prompt):
         body = {
             "model": "grok-3",
             "messages": [
-                {"role": "system", "content": "You're a bold, witty, aggressive crypto community voice."},
+                {"role": "system", "content": "You're a bold, aggressive crypto community voice. Mention 1 item from the knowledgebase only."},
                 {"role": "user", "content": prompt + "\n" + DEGEN_KNOWLEDGE + "\nEnd with NFA."}
             ],
-            "max_tokens": 180,
-            "temperature": 0.95
+            "max_tokens": 200,
+            "temperature": 0.9
         }
         headers = {"Authorization": f"Bearer {GROK_KEY}", "Content-Type": "application/json"}
         r = requests.post(GROK_URL, json=body, headers=headers)
@@ -157,63 +157,6 @@ def ask_grok(prompt):
         logger.error(f"Grok error: {e}")
         return "$DEGEN. NFA."
 
-async def mention_loop():
-    while True:
-        try:
-            last_id = db.get(f"{REDIS_PREFIX}last_mention_id")
-            res = x_client.get_users_mentions(
-                id=BOT_ID,
-                since_id=last_id,
-                tweet_fields=['id', 'text', 'author_id'],
-                expansions=['author_id'],
-                user_fields=['username'],
-                max_results=10
-            )
-            if res.data:
-                for tweet in reversed(res.data):
-                    tid = tweet.id
-                    if db.sismember(f"{REDIS_PREFIX}replied_ids", str(tid)):
-                        continue
-                    txt = tweet.text.replace('@askdegen', '').strip()
-                    db.set(f"{REDIS_PREFIX}last_mention_id", tid)
-                    db.lpush(f"{REDIS_PREFIX}context_mentions", txt)
-                    db.ltrim(f"{REDIS_PREFIX}context_mentions", 0, 25)
-                    db.sadd(f"{REDIS_PREFIX}replied_ids", str(tid))
-
-                    if 'raid' in txt.lower():
-                        prompt = f"Respond boldly to this call to raid: '{txt}'. Be edgy, confident, and always pro-$DEGEN. Mention @ogdegenonsol. End with NFA."
-                        grok_txt = ask_grok(prompt)
-                        img_list = glob.glob("raid_images/*.jpg")
-                        media = x_api.media_upload(choice(img_list)) if img_list else None
-                        x_client.create_tweet(text=grok_txt[:270], in_reply_to_tweet_id=tid,
-                                              media_ids=[media.media_id_string] if media else None)
-                        continue
-
-                    if txt.upper() == "DEX":
-                        d = fetch_data(DEGEN_ADDR)
-                        msg = format_metrics(d)
-                    elif txt.upper() == "CA":
-                        msg = f"Contract Address: {DEGEN_ADDR}"
-                    else:
-                        token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
-                        if token:
-                            sym, addr = resolve_token(token)
-                            if addr:
-                                d = fetch_data(addr)
-                                if sym == 'DEGEN':
-                                    msg = ask_grok(f"Shill $DEGEN hard using: {json.dumps(d)}")
-                                else:
-                                    msg = ask_grok(f"Give serious analysis of token {sym} based on these stats: {json.dumps(d)}")
-                            else:
-                                msg = ask_grok(txt)
-                        else:
-                            msg = ask_grok(txt)
-
-                    x_client.create_tweet(text=msg[:240], in_reply_to_tweet_id=tid)
-        except Exception as e:
-            logger.error(f"Poll loop error: {e}")
-        await asyncio.sleep(110)
-
 async def hourly_post_loop():
     while True:
         try:
@@ -222,14 +165,16 @@ async def hourly_post_loop():
                 await asyncio.sleep(60)
                 continue
             metrics = format_metrics(d)
-            prompt = f"Write a fresh new take using this data: {json.dumps(d)}"
-            db.lpush(f"{REDIS_PREFIX}context_hourly", prompt)
-            db.ltrim(f"{REDIS_PREFIX}context_hourly", 0, 10)
+            prompt = (
+                "Give a short update about $DEGEN price action or momentum in the last hour. "
+                "Use one sentence. Include observations like 'solid floor', 'volume spiking', 'buy pressure'. "
+                "Do not repeat earlier phrasing."
+            )
             tweet = ask_grok(prompt)
-            final = f"{metrics}\n{tweet}"
+            final = f"{metrics}\n\n{tweet}"
             last_post = db.get(f"{REDIS_PREFIX}last_hourly_post")
             if final.strip() != last_post:
-                x_client.create_tweet(text=final[:380])
+                x_client.create_tweet(text=final[:560])
                 db.set(f"{REDIS_PREFIX}last_hourly_post", final.strip())
                 logger.info("Hourly post success")
             else:
@@ -240,7 +185,6 @@ async def hourly_post_loop():
 
 async def main():
     await asyncio.gather(
-        mention_loop(),
         hourly_post_loop()
     )
 

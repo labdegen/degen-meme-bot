@@ -85,7 +85,6 @@ tweet_timestamps    = deque()
 
 async def safe_mention_lookup(fn, *args, **kwargs):
     now = time.time()
-    # purge old timestamps
     while mentions_timestamps and now - mentions_timestamps[0] > RATE_WINDOW:
         mentions_timestamps.popleft()
     if len(mentions_timestamps) >= MENTIONS_LIMIT:
@@ -98,7 +97,6 @@ async def safe_mention_lookup(fn, *args, **kwargs):
 
 async def safe_tweet(text: str, **kwargs):
     now = time.time()
-    # purge old timestamps
     while tweet_timestamps and now - tweet_timestamps[0] > RATE_WINDOW:
         tweet_timestamps.popleft()
     if len(tweet_timestamps) >= TWEETS_LIMIT:
@@ -117,6 +115,7 @@ async def safe_tweet(text: str, **kwargs):
     return resp
 
 # === HELPER FUNCTIONS ===
+
 def ask_grok(system_prompt: str, user_prompt: str, max_tokens: int = 200) -> str:
     body = {
         "model": "grok-3",
@@ -175,6 +174,7 @@ def fetch_data(addr: str) -> dict:
         'change_1h':  float(data.get('priceChange', {}).get('h1', 0)),
         'change_24h': float(data.get('priceChange', {}).get('h24', 0)),
         'link':       f"https://dexscreener.com/solana/{addr}",
+        'logo':       base.get('logoURI'),
         'address':    addr
     }
     db.setex(cache_key, 300, json.dumps(out))
@@ -194,38 +194,19 @@ def resolve_token(q: str) -> tuple:
         for item in results:
             if item.get('chainId') == 'solana':
                 base = item.get('baseToken', {})
-                symbol = base.get('symbol')
                 addr = item.get('pairAddress') or base.get('address')
                 if addr:
-                    return symbol, addr
+                    return base.get('symbol'), addr
     except Exception as e:
-        logger.warning(f"Dexscreener search failed for {s}: {e}")
-
+        logger.warning(f"Search fallback: {e}")
     try:
         prompt = f"Find the Solana token contract address for the symbol {s}. Return JSON {{'symbol': str, 'address': str}}."
         out = ask_perplexity("You are a Solana token resolver.", prompt)
         data = json.loads(out)
         return data.get("symbol"), data.get("address")
     except Exception as e:
-        logger.warning(f"Perplexity + Grok fallback for {s} failed: {e}")
+        logger.warning(f"Perplexity fallback: {e}")
         return None, None
-
-
-def format_metrics(data: dict) -> str:
-    return (f"🚀 {data['symbol']} | ${data['price_usd']:,.6f}\n"
-            f"MC ${data['market_cap']:,.0f} | Vol24 ${data['volume_usd']:,.0f}\n"
-            f"1h {'🟢' if data['change_1h']>=0 else '🔴'}{data['change_1h']:+.2f}% | "
-            f"24h {'🟢' if data['change_24h']>=0 else '🔴'}{data['change_24h']:+.2f}%\n"
-            f"{data['link']}")
-
-
-def format_convo_reply(data: dict, question: str) -> str:
-    prompt = (
-        f"Here are the token metrics: Symbol: {data['symbol']}, Price: ${data['price_usd']:.6f}, "
-        f"Market Cap: ${data['market_cap']:,.0f}, 24h Change: {data['change_24h']:+.2f}%, "
-        f"Volume: ${data['volume_usd']:,.0f}. Based on that, answer this in 230 characters or less, ending with 'NFA': {question}"
-    )
-    return ask_grok("You are a crypto analyst replying to questions.", prompt, max_tokens=120)
 
 # === FASTAPI ENDPOINTS & LOOPS ===
 @app.get("/")
@@ -243,7 +224,6 @@ async def poll_loop():
     while True:
         last     = db.get(f"{REDIS_PREFIX}last_tweet_id")
         since_id = int(last) if last else None
-
         res = await safe_mention_lookup(
             x_client.get_users_mentions,
             id=BOT_ID,
@@ -253,14 +233,11 @@ async def poll_loop():
             user_fields=['username'],
             max_results=10
         )
-
         if res and res.data:
             users = {u.id: u.username for u in res.includes.get('users', [])}
             for tw in reversed(res.data):
                 ev = {'tweet_create_events': [{
-                    'id_str':       str(tw.id),
-                    'text':         tw.text,
-                    'user':         {'screen_name': users.get(tw.author_id, '?')}
+                    'id_str': str(tw.id), 'text': tw.text, 'user': {'screen_name': users.get(tw.author_id, '?')}
                 }]}
                 try:
                     await handle_mention(ev)
@@ -268,7 +245,6 @@ async def poll_loop():
                     logger.error(f"Mention error: {e}")
                 db.set(f"{REDIS_PREFIX}last_tweet_id", tw.id)
                 db.set(f"{REDIS_PREFIX}last_mention", int(time.time()))
-
         await asyncio.sleep(90)
 
 async def hourly_post_loop():
@@ -284,13 +260,10 @@ async def hourly_post_loop():
             tweet = f"{card}\n{context}"
             if len(tweet) > 380:
                 tweet = tweet[:380].rsplit('.',1)[0] + '.'
-
             await safe_tweet(text=tweet)
             logger.info("Hourly promo posted")
-
         except Exception as e:
             logger.error(f"Promo loop error: {e}")
-
         await asyncio.sleep(3600)
 
 async def handle_mention(ev: dict):
@@ -301,29 +274,37 @@ async def handle_mention(ev: dict):
 
     txt = events[0]['text'].replace('@askdegen','').strip()
     tid = events[0]['id_str']
+    txt_up = txt.upper()
 
-    token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
-    if token:
-        sym, addr = resolve_token(token)
-        if addr:
-            d = fetch_data(addr)
-            if txt.strip() == token:
-                reply = format_metrics(d)
+    # Keyword triggers
+    if txt_up == 'DEX':
+        d = fetch_data(DEGEN_ADDR)
+        metrics = format_metrics(d)
+        logo = d.get('logo') or ''
+        reply = f"{metrics}\n{logo}"
+    elif txt_up == 'CA':
+        reply = f"Contract Address: {DEGEN_ADDR}"
+    else:
+        token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
+        if token:
+            sym, addr = resolve_token(token)
+            if addr:
+                d = fetch_data(addr)
+                reply = format_metrics(d) if txt.strip()==token else format_convo_reply(d, txt)
             else:
-                reply = format_convo_reply(d, txt)
+                reply = ask_perplexity(
+                    "You are a crypto researcher. Answer this tweet in under 240 characters clearly.",
+                    txt,
+                    max_tokens=160
+                )
         else:
-            reply = ask_perplexity(
-                "You are a crypto researcher. Answer this tweet in under 240 characters clearly.",
+            reply = ask_grok(
+                "Professional crypto professor: concise analytical response.",
                 txt,
                 max_tokens=160
             )
-    else:
-        reply = ask_grok(
-            "Professional crypto professor: concise analytical response.",
-            txt,
-            max_tokens=160
-        )
 
+    # Trim to 240 chars
     tweet = reply.strip()
     if len(tweet) > 240:
         if '.' in tweet:

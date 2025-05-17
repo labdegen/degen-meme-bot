@@ -173,7 +173,8 @@ async def poll_loop():
                 db.set(f"{REDIS_PREFIX}last_tweet_id", tw.id)
         await asyncio.sleep(110)
 
+async def main():
+    await asyncio.gather(poll_loop())
+
 if __name__ == "__main__":
-    asyncio.run(asyncio.gather(
-        poll_loop()
-    ))
+    asyncio.run(main())

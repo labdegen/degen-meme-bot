@@ -162,6 +162,7 @@ async def hourly_post_loop():
     while True:
         try:
             d = fetch_data(DEGEN_ADDR)
+            if not d: continue
             metrics = format_metrics(d)
             prompt = f"Here are the latest metrics for $DEGEN: {json.dumps(d)}"
             db.lpush(f"{REDIS_PREFIX}context_hourly", prompt)

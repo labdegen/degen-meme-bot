@@ -184,8 +184,11 @@ async def poll_loop():
                 for tw in reversed(mentions.data):
                     if str(tw.in_reply_to_user_id) != str(BOT_ID):
                         continue
-                    txt = tw.text
-                    if "raid" in txt.lower():
+                    txt = tw.text.strip()
+                    tid = tw.id
+                    txt_lower = txt.lower()
+                    
+                    if "raid" in txt_lower:
                         text = ask_grok("Start a bold tweet about buying $DEGEN and tag @ogdegenonsol")
                         images = glob.glob("raid_images/*.jpg")
                         if images:
@@ -194,6 +197,12 @@ async def poll_loop():
                             await safe_tweet(text=text, media_id=media.media_id_string)
                         else:
                             await safe_tweet(text=text)
+                    elif txt_lower == "dex":
+                        reply = format_metrics(fetch_data(DEGEN_ADDR))
+                        await safe_tweet(text=reply.strip(), in_reply_to_tweet_id=tid)
+                    elif txt_lower == "ca":
+                        reply = f"Contract Address: {DEGEN_ADDR}"
+                        await safe_tweet(text=reply.strip(), in_reply_to_tweet_id=tid)
                     else:
                         token = next((w for w in txt.split() if w.startswith("$") or ADDR_RE.match(w)), None)
                         if token:
@@ -202,11 +211,12 @@ async def poll_loop():
                                 d = fetch_data(addr)
                                 reply = format_metrics(d)
                             else:
-                                reply = ask_grok(f"Someone mentioned {token}. Respond boldly.")
+                                reply = "Token not found."
+                            await safe_tweet(text=reply.strip(), in_reply_to_tweet_id=tid)
                         else:
                             reply = ask_grok(txt)
-                        await safe_tweet(text=reply.strip(), in_reply_to_tweet_id=tw.id)
-                    db.set("last_mention_id", tw.id)
+                            await safe_tweet(text=reply.strip(), in_reply_to_tweet_id=tid)
+                    db.set("last_mention_id", tid)
         except Exception as e:
             logger.error(f"Poll loop error: {e}")
         await asyncio.sleep(110)
@@ -218,8 +228,8 @@ async def hourly_post_loop():
             card = format_metrics(d)
             context = ask_grok("Write a 1-sentence bullish summary of these metrics:")
             tweet = f"{card}\n{context}"
-            if len(tweet) > 380:
-                tweet = tweet[:380].rsplit('.', 1)[0] + '.'
+            if len(tweet) > 680:
+                tweet = tweet[:680].rsplit('.', 1)[0] + '.'
             await safe_tweet(text=tweet)
             logger.info("Hourly post success")
         except Exception as e:

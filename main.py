@@ -142,7 +142,7 @@ def ask_grok(prompt):
                 {"role": "system", "content": "You're a bold, witty, aggressive crypto community voice."},
                 {"role": "user", "content": prompt + "\n" + DEGEN_KNOWLEDGE + "\nEnd with NFA."}
             ],
-            "max_tokens": 180,
+            "max_tokens": 280,
             "temperature": 0.95
         }
         headers = {"Authorization": f"Bearer {GROK_KEY}", "Content-Type": "application/json"}
@@ -172,7 +172,7 @@ async def hourly_post_loop():
             final = f"{metrics}\n{tweet}"
             last_post = db.get(f"{REDIS_PREFIX}last_hourly_post")
             if final.strip() != last_post:
-                x_client.create_tweet(text=final[:380])
+                x_client.create_tweet(text=final[:580])
                 db.set(f"{REDIS_PREFIX}last_hourly_post", final.strip())
                 logger.info("Hourly post success")
             else:
@@ -204,12 +204,18 @@ async def mention_loop():
                     db.ltrim(f"{REDIS_PREFIX}context_mentions", 0, 25)
                     db.sadd(f"{REDIS_PREFIX}replied_ids", str(tid))
 
-                    if 'RAID' in txt.upper():
-                        grok_txt = ask_grok("Generate a bold call to raid $DEGEN. Tag @ogdegenonsol.")
-                        img_list = glob.glob("memes/*.jpg")
-                        media = x_api.media_upload(choice(img_list)) if img_list else None
-                        x_client.create_tweet(text=grok_txt, media_ids=[media.media_id_string] if media else None)
-                        continue
+                if 'raid' in txt.lower():
+    prompt = f"Respond boldly to this call to raid: '{txt}'. Be edgy, confident, and always pro-$DEGEN. Mention @ogdegenonsol. End with NFA."
+    grok_txt = ask_grok(prompt)
+    img_list = glob.glob("raid_images/*.jpg")
+    media = x_api.media_upload(choice(img_list)) if img_list else None
+    x_client.create_tweet(
+        text=grok_txt[:270],
+        in_reply_to_tweet_id=tid,
+        media_ids=[media.media_id_string] if media else None
+    )
+    continue
+
 
                     if txt.upper() == "DEX":
                         d = fetch_data(DEGEN_ADDR)

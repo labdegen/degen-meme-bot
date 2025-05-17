@@ -75,6 +75,7 @@ REDIS_PREFIX = "degen:"
 DEGEN_ADDR = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
 ADDR_RE = re.compile(r'^[A-Za-z0-9]{43,44}$')
 GROK_URL = "https://api.x.ai/v1/chat/completions"
+SEARCH_URL = "https://api.dexscreener.com/latest/dex/search?search={}"
 DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
 
 RATE_WINDOW = 900
@@ -83,23 +84,52 @@ TWEETS_LIMIT = 50
 mentions_timestamps = deque()
 tweet_timestamps = deque()
 
-async def safe_tweet(text, media_id=None, **kwargs):
-    now = time.time()
-    while tweet_timestamps and now - tweet_timestamps[0] > RATE_WINDOW:
-        tweet_timestamps.popleft()
-    if len(tweet_timestamps) >= TWEETS_LIMIT:
-        wait = RATE_WINDOW - (now - tweet_timestamps[0]) + 1
-        logger.warning(f"[RateGuard] Tweet limit hit; sleeping {wait:.0f}s")
-        await asyncio.sleep(wait)
+def resolve_token(q):
+    s = q.upper().lstrip('$')
+    if s == 'DEGEN':
+        return 'DEGEN', DEGEN_ADDR
+    if ADDR_RE.match(s):
+        return None, s
     try:
-        if media_id:
-            return x_client.create_tweet(text=text, media_ids=[media_id], **kwargs)
-        return x_client.create_tweet(text=text, **kwargs)
-    except tweepy.TooManyRequests as e:
-        reset = int(e.response.headers.get("x-rate-limit-reset", time.time() + RATE_WINDOW))
-        await asyncio.sleep(max(0, reset - time.time()) + 1)
-        return await safe_tweet(text, media_id=media_id, **kwargs)
-    tweet_timestamps.append(time.time())
+        resp = requests.get(SEARCH_URL.format(s), timeout=10)
+        resp.raise_for_status()
+        for item in resp.json():
+            if item.get('chainId') == 'solana':
+                base = item.get('baseToken', {})
+                addr = item.get('pairAddress') or base.get('address')
+                if addr:
+                    return base.get('symbol'), addr
+    except:
+        pass
+    return None, None
+
+def fetch_data(addr=DEGEN_ADDR):
+    try:
+        r = requests.get(f"{DEXS_URL}{addr}", timeout=10)
+        r.raise_for_status()
+        data = r.json()[0]
+        base = data.get('baseToken', {})
+        out = {
+            'symbol': base.get('symbol'),
+            'price_usd': float(data.get('priceUsd', 0)),
+            'volume_usd': float(data.get('volume', {}).get('h24', 0)),
+            'market_cap': float(data.get('marketCap', 0)),
+            'change_1h': float(data.get('priceChange', {}).get('h1', 0)),
+            'change_24h': float(data.get('priceChange', {}).get('h24', 0)),
+            'link': f"https://dexscreener.com/solana/{addr}"
+        }
+        return out
+    except Exception as e:
+        logger.error(f"Fetch error: {e}")
+        return {}
+
+def format_metrics(data):
+    return (
+        f"🚀 {data['symbol']} | ${data['price_usd']:,.6f}\n"
+        f"MC ${data['market_cap']:,.0f} | Vol24 ${data['volume_usd']:,.0f}\n"
+        f"1h {'🟢' if data['change_1h'] >= 0 else '🔴'}{data['change_1h']:+.2f}% | "
+        f"24h {'🟢' if data['change_24h'] >= 0 else '🔴'}{data['change_24h']:+.2f}%\n{data['link']}"
+    )
 
 def ask_grok(prompt):
     try:
@@ -120,54 +150,63 @@ def ask_grok(prompt):
         logger.error(f"Grok error: {e}")
         return "$DEGEN. NFA."
 
-def fetch_data():
+async def safe_tweet(text, media_id=None, **kwargs):
+    now = time.time()
+    while tweet_timestamps and now - tweet_timestamps[0] > RATE_WINDOW:
+        tweet_timestamps.popleft()
+    if len(tweet_timestamps) >= TWEETS_LIMIT:
+        wait = RATE_WINDOW - (now - tweet_timestamps[0]) + 1
+        logger.warning(f"[RateGuard] Tweet limit hit; sleeping {wait:.0f}s")
+        await asyncio.sleep(wait)
     try:
-        r = requests.get(f"{DEXS_URL}{DEGEN_ADDR}", timeout=10)
-        r.raise_for_status()
-        data = r.json()[0]
-        base = data.get('baseToken', {})
-        out = {
-            'symbol': base.get('symbol'),
-            'price_usd': float(data.get('priceUsd', 0)),
-            'volume_usd': float(data.get('volume', {}).get('h24', 0)),
-            'market_cap': float(data.get('marketCap', 0)),
-            'change_1h': float(data.get('priceChange', {}).get('h1', 0)),
-            'change_24h': float(data.get('priceChange', {}).get('h24', 0)),
-            'link': f"https://dexscreener.com/solana/{DEGEN_ADDR}"
-        }
-        return out
-    except Exception as e:
-        logger.error(f"Fetch error: {e}")
-        return {}
-
-def format_metrics(data):
-    return (
-        f"🚀 {data['symbol']} | ${data['price_usd']:,.6f}\n"
-        f"MC ${data['market_cap']:,.0f} | Vol24 ${data['volume_usd']:,.0f}\n"
-        f"1h {'🟢' if data['change_1h'] >= 0 else '🔴'}{data['change_1h']:+.2f}% | "
-        f"24h {'🟢' if data['change_24h'] >= 0 else '🔴'}{data['change_24h']:+.2f}%\n{data['link']}"
-    )
+        if media_id:
+            return x_client.create_tweet(text=text, media_ids=[media_id], **kwargs)
+        return x_client.create_tweet(text=text, **kwargs)
+    except tweepy.TooManyRequests as e:
+        reset = int(e.response.headers.get("x-rate-limit-reset", time.time() + RATE_WINDOW))
+        await asyncio.sleep(max(0, reset - time.time()) + 1)
+        return await safe_tweet(text, media_id=media_id, **kwargs)
+    tweet_timestamps.append(time.time())
 
 async def poll_loop():
     while True:
         try:
-            mentions = x_api.mentions_timeline(count=10, tweet_mode="extended")
             last_id = db.get("last_mention_id")
-            for mention in reversed(mentions):
-                if last_id and str(mention.id) <= str(last_id):
-                    continue
-                if mention.in_reply_to_status_id is not None:
-                    continue  # skip replies
-                if "raid" in mention.full_text.lower():
-                    text = ask_grok("Start a bold tweet about buying $DEGEN and tag @ogdegenonsol")
-                    images = glob.glob("raid_images/*.jpg")
-                    if images:
-                        img = choice(images)
-                        media = x_api.media_upload(img)
-                        await safe_tweet(text=text, media_id=media.media_id_string)
+            mentions = x_client.get_users_mentions(
+                id=BOT_ID,
+                since_id=last_id,
+                tweet_fields=["id", "text", "author_id", "in_reply_to_user_id"],
+                expansions=["author_id"],
+                user_fields=["username"],
+                max_results=10
+            )
+            if mentions and mentions.data:
+                for tw in reversed(mentions.data):
+                    if str(tw.in_reply_to_user_id) != str(BOT_ID):
+                        continue
+                    txt = tw.text
+                    if "raid" in txt.lower():
+                        text = ask_grok("Start a bold tweet about buying $DEGEN and tag @ogdegenonsol")
+                        images = glob.glob("raid_images/*.jpg")
+                        if images:
+                            img = choice(images)
+                            media = x_api.media_upload(img)
+                            await safe_tweet(text=text, media_id=media.media_id_string)
+                        else:
+                            await safe_tweet(text=text)
                     else:
-                        await safe_tweet(text=text)
-                db.set("last_mention_id", mention.id)
+                        token = next((w for w in txt.split() if w.startswith("$") or ADDR_RE.match(w)), None)
+                        if token:
+                            sym, addr = resolve_token(token)
+                            if addr:
+                                d = fetch_data(addr)
+                                reply = format_metrics(d)
+                            else:
+                                reply = ask_grok(f"Someone mentioned {token}. Respond boldly.")
+                        else:
+                            reply = ask_grok(txt)
+                        await safe_tweet(text=reply.strip(), in_reply_to_tweet_id=tw.id)
+                    db.set("last_mention_id", tw.id)
         except Exception as e:
             logger.error(f"Poll loop error: {e}")
         await asyncio.sleep(110)

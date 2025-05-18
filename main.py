@@ -77,13 +77,54 @@ GROK_URL = "https://api.x.ai/v1/chat/completions"
 SEARCH_URL = "https://api.dexscreener.com/latest/dex/search?search={}"
 DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
 
-RATE_WINDOW = 900
+# Rate limit windows
+RATE_WINDOW = 900  # 15 minutes
 MENTIONS_LIMIT = 10
 TWEETS_LIMIT = 50
 mentions_timestamps = deque()
 tweet_timestamps = deque()
 
-# === Helper Functions ===
+# === Rate Guard Helpers ===
+async def safe_mention_lookup(fn, *args, **kwargs):
+    now = time.time()
+    while mentions_timestamps and now - mentions_timestamps[0] > RATE_WINDOW:
+        mentions_timestamps.popleft()
+    if len(mentions_timestamps) >= MENTIONS_LIMIT:
+        wait = RATE_WINDOW - (now - mentions_timestamps[0]) + 1
+        logger.warning(f"[RateGuard] Mentions limit reached; sleeping {wait:.0f}s")
+        await asyncio.sleep(wait)
+    try:
+        res = fn(*args, **kwargs)
+    except tweepy.TooManyRequests as e:
+        reset = int(e.response.headers.get('x-rate-limit-reset', time.time() + RATE_WINDOW))
+        wait = max(0, reset - time.time()) + 1
+        logger.error(f"[RateGuard] get_users_mentions 429; backing off {wait:.0f}s")
+        await asyncio.sleep(wait)
+        return await safe_mention_lookup(fn, *args, **kwargs)
+    mentions_timestamps.append(time.time())
+    return res
+
+async def safe_tweet(text: str, **kwargs):
+    now = time.time()
+    while tweet_timestamps and now - tweet_timestamps[0] > RATE_WINDOW:
+        tweet_timestamps.popleft()
+    if len(tweet_timestamps) >= TWEETS_LIMIT:
+        wait = RATE_WINDOW - (now - tweet_timestamps[0]) + 1
+        logger.warning(f"[RateGuard] Tweet limit reached; sleeping {wait:.0f}s")
+        await asyncio.sleep(wait)
+    try:
+        resp = x_client.create_tweet(text=text, **kwargs)
+    except tweepy.TooManyRequests as e:
+        reset = int(e.response.headers.get('x-rate-limit-reset', time.time() + RATE_WINDOW))
+        wait = max(0, reset - time.time()) + 1
+        logger.error(f"[RateGuard] create_tweet 429; backing off {wait:.0f}s")
+        await asyncio.sleep(wait)
+        return await safe_tweet(text=text, **kwargs)
+    tweet_timestamps.append(time.time())
+    return resp
+
+# === Core Helpers ===
+
 def resolve_token(q):
     s = q.upper().lstrip('$')
     if s == 'DEGEN':
@@ -159,14 +200,14 @@ def ask_grok(prompt):
         return "$DEGEN. NFA."
 
 
-def post_raid(tweet):
+async def post_raid(tweet):
     txt_lower = tweet.text.lower()
     if '@askdegen' in txt_lower and 'raid' in txt_lower:
         prompt = f"Write a short one-liner hype for $DEGEN based on this: '{tweet.text}'. Mention @ogdegenonsol but don't say 'raid'. End with NFA."
         msg = ask_grok(prompt)
         img_list = glob.glob("raid_images/*.jpg")
         media = x_api.media_upload(choice(img_list)) if img_list else None
-        x_client.create_tweet(
+        await safe_tweet(
             text=msg[:240],
             in_reply_to_tweet_id=tweet.id,
             media_ids=[media.media_id_string] if media else None
@@ -174,12 +215,12 @@ def post_raid(tweet):
         db.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
         logger.info("Raid reply sent")
 
-
 async def mention_loop():
     while True:
         try:
             last_id = db.get(f"{REDIS_PREFIX}last_mention_id")
-            res = x_client.get_users_mentions(
+            res = await safe_mention_lookup(
+                x_client.get_users_mentions,
                 id=BOT_ID,
                 since_id=last_id,
                 tweet_fields=['id', 'text'],
@@ -193,11 +234,11 @@ async def mention_loop():
                     if db.sismember(f"{REDIS_PREFIX}replied_ids", str(tid)):
                         continue
                     db.set(f"{REDIS_PREFIX}last_mention_id", tid)
+                    txt = tw.text.replace('@askdegen', '').strip()
                     if 'raid' in tw.text.lower() and '@askdegen' in tw.text.lower():
-                        post_raid(tw)
+                        await post_raid(tw)
                         continue
 
-                    txt = tw.text.replace('@askdegen', '').strip()
                     token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
                     if token:
                         sym, addr = resolve_token(token)
@@ -217,24 +258,23 @@ async def mention_loop():
                     else:
                         msg = ask_grok(txt)
 
-                    x_client.create_tweet(text=msg[:240], in_reply_to_tweet_id=tid)
+                    await safe_tweet(text=msg[:240], in_reply_to_tweet_id=tid)
                     db.sadd(f"{REDIS_PREFIX}replied_ids", str(tid))
         except Exception as e:
             logger.error(f"Mention loop error: {e}")
         await asyncio.sleep(110)
-
 
 async def hourly_post_loop():
     while True:
         try:
             data = fetch_data(DEGEN_ADDR)
             metrics = format_metrics(data)
-            prompt = "Give a punchy one-sentence update on $DEGEN using these metrics, vary every hour."            
+            prompt = "Give a punchy one-sentence update on $DEGEN using these metrics, vary every hour."
             tweet = ask_grok(prompt)
             final = f"{metrics}\n\n{tweet}"
             last = db.get(f"{REDIS_PREFIX}last_hourly_post")
             if final.strip() != last:
-                x_client.create_tweet(text=final[:560])
+                await safe_tweet(text=final[:560])
                 db.set(f"{REDIS_PREFIX}last_hourly_post", final.strip())
                 logger.info("Hourly post success")
             else:

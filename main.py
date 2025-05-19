@@ -96,9 +96,9 @@ DEGEN_SYSTEM = (
     "If asked about metrics, use ONLY the data provided, and be positive/promotional."
 )
 GENERAL_SYSTEM = (
-    "You are a top-tier crypto analyst: concise, smart, on-topic. "
-    "Provide answers in 2–3 sentences max, leaving something to the imagination. "
-    "If asked about $DEGEN, always be positive and persuasive to buy $DEGEN."
+    "You are a general-knowledge expert: concise, smart, and helpful. "
+    "Answer any question in 2–3 sentences, on any topic. "
+    "If the question mentions $DEGEN or that contract address, still follow the DEGEN rules."
 )
 
 def ask_with_system(system_prompt, prompt, prefer_grok=False):

@@ -236,10 +236,10 @@ async def handle_mention(tw):
         prompt = (
             f"Metrics: {json.dumps(data)}\n"
             f"User asked: {text}\n"
-            "Using ONLY these metrics, respond under 240 characters."
+            "Using ONLY these metrics, respond under 800 characters."
         )
         raw = ask_with_system(DEGEN_SYSTEM, prompt, prefer_grok=True)
-        reply = truncate_to_sentence(raw, 240)
+        reply = truncate_to_sentence(raw, 800)
         await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
         return
     # Other token by symbol or address
@@ -291,7 +291,7 @@ async def hourly_post_loop():
             metrics = format_metrics(data)
             prompt = (
                 f"Metrics: {json.dumps(data)}\n"
-                "Write a punchy one-sentence update on $DEGEN at the contract above. "
+                "Write a punchy one-sentence update on $DEGEN at the contract above. Do not mention the contract address in reply.  You are a holder of the $DEGEN coin.  Be confident and positive.  You are promoting the token.  Make people excited about it and want to buy it."
                 "End on a complete sentence."
             )
             raw   = ask_with_system(DEGEN_SYSTEM, prompt, prefer_grok=True)

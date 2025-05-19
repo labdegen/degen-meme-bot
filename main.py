@@ -73,9 +73,6 @@ TWEETS_LIMIT    = 50
 mentions_timestamps = deque()
 tweet_timestamps    = deque()
 
-RECENT_REPLIES_KEY   = f"{REDIS_PREFIX}recent_replies"
-RECENT_REPLIES_LIMIT = 50
-
 def truncate_to_sentence(text: str, max_length: int) -> str:
     if len(text) <= max_length:
         return text
@@ -86,20 +83,19 @@ def truncate_to_sentence(text: str, max_length: int) -> str:
             return snippet[:idx+1]
     return snippet
 
-# System prompt: always Grok, always DEGEN-focused
-DEGEN_SYSTEM = (
-    "You are a crypto analyst: concise, sharp, professional, genius-level. "
-    f"Always answer ONLY about the $DEGEN token at contract address {DEGEN_ADDR} on Solana. "
-    "Do NOT mention any other token or chain. If asked about metrics, use ONLY the data provided, "
-    "and be positive/promotional about $DEGEN."
+# Grok-only prompt: bulletproof $DEGEN on Solana
+SYSTEM_PROMPT = (
+    "You are a crypto analyst: concise, sharp and professional. "
+    f"Always speak about the $DEGEN token at contract address {DEGEN_ADDR} on Solana. "
+    "Do NOT mention any other token or chain."
 )
 
 def ask_grok(prompt: str) -> str:
     body = {
         "model": "grok-3-latest",
         "messages": [
-            {"role": "system", "content": DEGEN_SYSTEM},
-            {"role": "user",   "content": prompt}
+            {"role": "system",  "content": SYSTEM_PROMPT},
+            {"role": "user",    "content": prompt}
         ],
         "max_tokens": 180,
         "temperature": 0.8
@@ -152,12 +148,12 @@ def fetch_data(addr: str) -> dict:
             data = data[0]
         base = data.get('baseToken', {})
         return {
-            'symbol':     base.get('symbol', 'DEGEN'),
-            'price_usd':  float(data.get('priceUsd', 0)),
-            'volume_usd': float(data.get('volume', {}).get('h24', 0)),
-            'market_cap': float(data.get('marketCap', 0)),
-            'change_1h':  float(data.get('priceChange', {}).get('h1', 0)),
-            'change_24h': float(data.get('priceChange', {}).get('h24', 0)),
+            'symbol':     base.get('symbol','DEGEN'),
+            'price_usd':  float(data.get('priceUsd',0)),
+            'volume_usd': float(data.get('volume',{}).get('h24',0)),
+            'market_cap': float(data.get('marketCap',0)),
+            'change_1h':  float(data.get('priceChange',{}).get('h1',0)),
+            'change_24h': float(data.get('priceChange',{}).get('h24',0)),
             'link':       f"https://dexscreener.com/solana/{addr}"
         }
     except Exception as e:
@@ -208,12 +204,12 @@ async def post_raid(tweet):
 async def handle_mention(tw):
     text = tw.text.replace("@askdegen","").strip()
 
-    # Raid
+    # 1) raid
     if re.search(r"\braid\b", text, re.IGNORECASE):
         await post_raid(tw)
         return
 
-    # Token/address → metrics only
+    # 2) token/address → metrics
     token = next((w for w in text.split() if w.startswith('$') or ADDR_RE.match(w)), None)
     if token:
         sym = token.lstrip('$').upper()
@@ -223,21 +219,24 @@ async def handle_mention(tw):
             await safe_tweet(text=format_metrics(data), in_reply_to_tweet_id=tw.id)
             return
 
-    # CA
-    if text.upper()=="CA":
+    # 3) CA
+    if text.upper() == "CA":
         await safe_tweet(text=f"Contract Address: {DEGEN_ADDR}", in_reply_to_tweet_id=tw.id)
         return
 
-    # DEX
-    if text.upper()=="DEX":
+    # 4) DEX
+    if text.upper() == "DEX":
         data = fetch_data(DEGEN_ADDR)
         await safe_tweet(text=format_metrics(data), in_reply_to_tweet_id=tw.id)
         return
 
-    # Any other question: acknowledge + bullpost + meme
-    ack = f"Acknowledge the question but turn it around into an answer about buying $DEGEN."
-    hype = ask_grok("Write a one-liner hype for $DEGEN at Solana contract " + DEGEN_ADDR)
-    msg = f"{ack}\n{hype}"
+    # 5) any other question → natural ack + DEGEN hype + meme
+    prompt = (
+        f"First, respond naturally and concisely to the question: \"{text}\" "
+        f"Then, in a second sentence, bullpost the Solana $DEGEN token at contract {DEGEN_ADDR} "
+        "and be promotional. End with NFA."
+    )
+    msg = ask_grok(prompt)
     img = choice(glob.glob("raid_images/*.jpg"))
     media_id = x_api.media_upload(img).media_id_string
     await safe_tweet(

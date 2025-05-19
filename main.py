@@ -61,7 +61,7 @@ x_api = tweepy.API(oauth)
 # Constants
 REDIS_PREFIX = "degen:"
 DEGEN_ADDR   = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
-GROK_URL     = "https://api.x.ai/v1/chat/completions"
+GROK_URL     = "https://api.x.ai/v2/chat/completions"
 PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
 DEXS_SEARCH_URL = "https://api.dexscreener.com/api/search?query="
 DEXS_URL     = "https://api.dexscreener.com/token-pairs/v1/solana/"

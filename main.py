@@ -315,7 +315,7 @@ async def hourly_post_loop():
                 f"Metrics: {json.dumps(data)}\n"
                 "Using ONLY these metrics, write a punchy one-sentence update on $DEGEN "
                 "at contract address 6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f on Solana. "
-                "Do NOT invent supply or max cap. End on a complete sentence."
+                "Do NOT invent supply or max cap. End on a complete sentence. Do not write the contract address in the response.  You are a community memeber for $DEGEN, the post must be positive and make people interested in buying the token.  Speak as if you are a holder and want the coin to do well. Be confident and a little edgy."
             )
             raw = ask_grok(prompt)
             tweet = truncate_to_sentence(raw, 560)

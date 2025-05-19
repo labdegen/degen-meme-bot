@@ -116,7 +116,7 @@ def ask_with_system(system_prompt, prompt, prefer_grok=False):
     headers = {"Authorization": f"Bearer {GROK_KEY if prefer_grok else PERPLEXITY_KEY}",
                "Content-Type": "application/json"}
     try:
-        r = requests.post(url, json=body, headers=headers, timeout=25)
+        r = requests.post(url, json=body, headers=headers, timeout=45)
         r.raise_for_status()
         return r.json()['choices'][0]['message']['content'].strip()
     except Exception as e:

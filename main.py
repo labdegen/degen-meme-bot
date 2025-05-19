@@ -9,10 +9,12 @@ import json
 import asyncio
 import time
 from collections import deque
-from random import choice
-import glob
 import numpy as np
 from sentence_transformers import SentenceTransformer
+
+# Redis vector search imports
+from redis.commands.search.field import TextField, VectorField
+from redis.commands.search.indexDefinition import IndexDefinition
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -82,6 +84,33 @@ TWEETS_LIMIT = 50
 mentions_timestamps = deque()
 tweet_timestamps = deque()
 
+# === Data Fetcher for $DEGEN ===
+def fetch_data(addr):
+    try:
+        url = DEXS_URL + addr
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        pair = data['pairs'][0]
+        return {
+            'price_usd': float(pair['priceUsd']),
+            'market_cap': float(pair.get('fdv', 0)),
+            'volume_usd': float(pair['volume']['h24']),
+            'change_1h': float(pair['priceChange']['h1']),
+            'change_24h': float(pair['priceChange']['h24']),
+            'liquidity_usd': float(pair['liquidity']['usd'])
+        }
+    except Exception as e:
+        logger.warning(f"fetch_data error: {e}")
+        return {
+            'price_usd': 0,
+            'market_cap': 0,
+            'volume_usd': 0,
+            'change_1h': 0,
+            'change_24h': 0,
+            'liquidity_usd': 0
+        }
+
 # === Enhanced Memory System ===
 def store_conversation(tweet, response):
     embedding = embedder.encode(f"{tweet.text} {response}")
@@ -105,7 +134,8 @@ def get_conversation_context(conversation_id, current_text):
             query_params={"vec": query}
         )
         return "\n".join([doc.text for doc in res.docs])
-    except:
+    except Exception as e:
+        logger.warning(f"get_conversation_context error: {e}")
         return ""
 
 # === Rate Guard Helpers ===
@@ -208,18 +238,16 @@ def identify_chart_pattern(data):
 async def handle_mention(tw):
     convo_id = tw.conversation_id or tw.id
     convo_count = get_convo_count(convo_id)
-    
     if convo_count >= 2:
         return
-    
+
     context = get_conversation_context(convo_id, tw.text)
     prompt = f"Query: {tw.text}\nRespond with professional crypto analysis using: {context}"
-    
     response = ask_perplexity(prompt, context)
-    
+
     if convo_count == 1:
         response += " [Degen Out]"
-    
+
     await safe_tweet(text=response[:240], in_reply_to_tweet_id=tw.id)
     store_conversation(tw, response)
     track_convo(convo_id, convo_count + 1)
@@ -255,7 +283,6 @@ async def hourly_post_loop():
             insight = ask_perplexity(prompt)
             metrics = format_metrics(data)
             final = f"{metrics}\n\n💡 {insight[:140]}"
-            
             if final != db.get(f"{REDIS_PREFIX}last_hourly_post"):
                 await safe_tweet(text=final[:560])
                 db.setex(f"{REDIS_PREFIX}last_hourly_post", 3600, final)
@@ -286,5 +313,5 @@ if __name__ == "__main__":
         db.ft("conv_idx").create_index(schema, definition=IndexDefinition(prefix=[f"{REDIS_PREFIX}conv:"]))
     except Exception as e:
         logger.info(f"Vector index already exists: {e}")
-    
+
     asyncio.run(main())

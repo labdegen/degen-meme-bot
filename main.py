@@ -9,42 +9,34 @@ import json
 import asyncio
 import time
 from collections import deque
-import numpy as np
-from sentence_transformers import SentenceTransformer
 
-# Redis vector search imports
-from redis.commands.search.field import TextField, VectorField
-from redis.commands.search.indexDefinition import IndexDefinition
-
-# Configure logging
+# --- Logging ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load environment variables
+# --- Load env ---
 load_dotenv()
-required_vars = [
+for v in [
     "X_API_KEY", "X_API_KEY_SECRET",
     "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET",
     "X_BEARER_TOKEN",
     "PERPLEXITY_API_KEY",
     "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"
-]
-for v in required_vars:
+]:
     if not os.getenv(v):
         raise RuntimeError(f"Missing env var: {v}")
 
-# Initialize embedding model
-embedder = SentenceTransformer('all-MiniLM-L6-v2')
-
-# Credentials
+# --- Twitter + Redis setup ---
 API_KEY = os.getenv("X_API_KEY")
 API_KEY_SECRET = os.getenv("X_API_KEY_SECRET")
 ACCESS_TOKEN = os.getenv("X_ACCESS_TOKEN")
 ACCESS_TOKEN_SECRET = os.getenv("X_ACCESS_TOKEN_SECRET")
 BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
 PERPLEXITY_KEY = os.getenv("PERPLEXITY_API_KEY")
+REDIS_PREFIX = "degen:"
+DEGEN_ADDR = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
+DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
 
-# Redis client
 db = redis.Redis(
     host=os.getenv("REDIS_HOST"),
     port=int(os.getenv("REDIS_PORT")),
@@ -54,7 +46,6 @@ db = redis.Redis(
 db.ping()
 logger.info("Redis connected")
 
-# Twitter clients
 x_client = tweepy.Client(
     bearer_token=BEARER_TOKEN,
     consumer_key=API_KEY,
@@ -69,22 +60,14 @@ logger.info(f"Authenticated as: {me.username} (ID: {BOT_ID})")
 oauth = tweepy.OAuth1UserHandler(API_KEY, API_KEY_SECRET, ACCESS_TOKEN, ACCESS_TOKEN_SECRET)
 x_api = tweepy.API(oauth)
 
-# Constants
-REDIS_PREFIX = "degen:"
-DEGEN_ADDR = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
-ADDR_RE = re.compile(r'^[A-Za-z0-9]{43,44}$')
-PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
-SEARCH_URL = "https://api.dexscreener.com/latest/dex/search?search={}"
-DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
-
-# Rate limit windows
-RATE_WINDOW = 900  # 15 minutes
+# --- Rate limiting ---
+RATE_WINDOW = 900
 MENTIONS_LIMIT = 10
 TWEETS_LIMIT = 50
 mentions_timestamps = deque()
 tweet_timestamps = deque()
 
-# === Data Fetcher for $DEGEN ===
+# --- Data Fetcher ---
 def fetch_data(addr):
     try:
         url = DEXS_URL + addr
@@ -111,34 +94,90 @@ def fetch_data(addr):
             'liquidity_usd': 0
         }
 
-# === Enhanced Memory System ===
-def store_conversation(tweet, response):
-    embedding = embedder.encode(f"{tweet.text} {response}")
-    key = f"{REDIS_PREFIX}conv:{tweet.conversation_id or tweet.id}"
-    pipeline = db.pipeline()
-    pipeline.hset(key, mapping={
-        "tweet_id": str(tweet.id),
-        "text": f"User: {tweet.text}\nBot: {response}",
-        "embedding": np.array(embedding).tobytes()
-    })
-    pipeline.expire(key, 604800)  # 1 week retention
-    pipeline.execute()
+# --- Pro/Edgy Metrics ---
+def format_metrics(d):
+    return (
+        f"🔮 $DEGEN Insights\n"
+        f"Price: ${d['price_usd']:,.4f} | MCap: ${d['market_cap']:,.0f}\n"
+        f"24h Vol: ${d['volume_usd']:,.0f} | 1h: {d['change_1h']:+.2f}%\n"
+        f"Pattern Recognition: {identify_chart_pattern(d)}"
+    )
 
-def get_conversation_context(conversation_id, current_text):
+def identify_chart_pattern(data):
+    changes = [data['change_1h'], data['change_24h']]
+    if all(c > 0 for c in changes):
+        return "Bullish Ascending Triangle"
+    elif changes[0] > 0 > changes[1]:
+        return "Bull Flag Formation"
+    else:
+        return "Consolidation Phase"
+
+# --- Perplexity AI ---
+def ask_perplexity(prompt):
+    headers = {"Authorization": f"Bearer {PERPLEXITY_KEY}", "Content-Type": "application/json"}
+    body = {
+        "model": "sonar-medium-chat",
+        "messages": [
+            {
+                "role": "system",
+                "content": """You're a crypto analyst with deep technical insight and market savvy. Respond with:
+- Chain analysis (volume, liquidity pools)
+- Sentiment interpretation (social, whale activity)
+- Technical patterns (chart formations, indicators)
+- Concise, professional, a little edgy (no emojis)
+- Never mention a knowledge base or context explicitly.
+"""
+            },
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 180,
+        "temperature": 0.65,
+        "frequency_penalty": 1.1,
+        "presence_penalty": 0.9
+    }
     try:
-        embedding = embedder.encode(current_text)
-        query = np.array(embedding).tobytes()
-        res = db.ft("conv_idx").search(
-            f"@tweet_id:{conversation_id}",
-            vector_query=f"embedding:[KNN 3 $vec]=>{{$yield_distance_as: score}}",
-            query_params={"vec": query}
-        )
-        return "\n".join([doc.text for doc in res.docs])
+        r = requests.post("https://api.perplexity.ai/chat/completions", json=body, headers=headers, timeout=25)
+        r.raise_for_status()
+        return r.json()['choices'][0]['message']['content'].strip()
     except Exception as e:
-        logger.warning(f"get_conversation_context error: {e}")
-        return ""
+        logger.warning(f"Perplexity error: {e}")
+        return "Analyzing market patterns... Check back soon. [Degen Out]"
 
-# === Rate Guard Helpers ===
+# --- Recent Replies Memory ---
+RECENT_REPLIES_KEY = f"{REDIS_PREFIX}recent_replies"
+RECENT_REPLIES_LIMIT = 50
+
+def save_recent_reply(user_text, bot_text):
+    entry = json.dumps({"user": user_text, "bot": bot_text})
+    db.lpush(RECENT_REPLIES_KEY, entry)
+    db.ltrim(RECENT_REPLIES_KEY, 0, RECENT_REPLIES_LIMIT - 1)
+
+def get_recent_replies(n=5):
+    items = db.lrange(RECENT_REPLIES_KEY, 0, n-1)
+    replies = [json.loads(x) for x in items]
+    return replies
+
+# --- Conversation Memory (per thread) ---
+def get_thread_key(convo_id):
+    return f"{REDIS_PREFIX}thread:{convo_id}"
+
+def get_convo_count(convo_id):
+    return int(db.hget(get_thread_key(convo_id), "count") or 0)
+
+def increment_convo_count(convo_id):
+    db.hincrby(get_thread_key(convo_id), "count", 1)
+    db.expire(get_thread_key(convo_id), 86400)
+
+def get_thread_history(convo_id):
+    return db.hget(get_thread_key(convo_id), "history") or ""
+
+def update_thread_history(convo_id, user_text, bot_text):
+    history = get_thread_history(convo_id)
+    new_history = (history + f"\nUser: {user_text}\nBot: {bot_text}")[-1000:]  # last 1000 chars
+    db.hset(get_thread_key(convo_id), "history", new_history)
+    db.expire(get_thread_key(convo_id), 86400)
+
+# --- Rate Guard ---
 async def safe_mention_lookup(fn, *args, **kwargs):
     now = time.time()
     while mentions_timestamps and now - mentions_timestamps[0] > RATE_WINDOW:
@@ -177,80 +216,29 @@ async def safe_tweet(text: str, **kwargs):
     tweet_timestamps.append(time.time())
     return resp
 
-# === Enhanced AI Helpers ===
-def ask_perplexity(prompt, context=""):
-    headers = {"Authorization": f"Bearer {PERPLEXITY_KEY}", "Content-Type": "application/json"}
-    body = {
-        "model": "sonar-medium-chat",
-        "messages": [
-            {
-                "role": "system",
-                "content": f"""You're a crypto analyst combining deep technical insight with market savvy. Respond with:
-- Chain analysis (volume, liquidity pools)
-- Sentiment interpretation (social, whale activity)
-- Technical patterns (chart formations, indicators)
-- Concise professional tone (no emojis)
-- Creative analogies for complex concepts
-
-Context:{context}"""
-            },
-            {"role": "user", "content": prompt}
-        ],
-        "max_tokens": 180,
-        "temperature": 0.65,
-        "frequency_penalty": 1.1,
-        "presence_penalty": 0.9
-    }
-    try:
-        r = requests.post(PERPLEXITY_URL, json=body, headers=headers, timeout=25)
-        r.raise_for_status()
-        return r.json()['choices'][0]['message']['content'].strip()
-    except Exception as e:
-        logger.warning(f"Perplexity error: {e}")
-        return "Analyzing market patterns... Check back soon. [Degen Out]"
-
-# === Conversation Management ===
-def track_convo(tweet_id, reply_count):
-    db.setex(f"{REDIS_PREFIX}convo:{tweet_id}", 86400, reply_count)
-
-def get_convo_count(tweet_id):
-    return int(db.get(f"{REDIS_PREFIX}convo:{tweet_id}") or 0)
-
-# === Enhanced Metrics Formatting ===
-def format_metrics(d):
-    return (
-        f"🔮 $DEGEN Insights\n"
-        f"Price: ${d['price_usd']:,.4f} | MCap: ${d['market_cap']:,.0f}\n"
-        f"24h Vol: ${d['volume_usd']:,.0f} | 1h: {d['change_1h']:+.2f}%\n"
-        f"Pattern Recognition: {identify_chart_pattern(d)}"
-    )
-
-def identify_chart_pattern(data):
-    changes = [data['change_1h'], data['change_24h']]
-    if all(c > 0 for c in changes):
-        return "Bullish Ascending Triangle"
-    elif changes[0] > 0 > changes[1]:
-        return "Bull Flag Formation"
-    else:
-        return "Consolidation Phase"
-
-# === Core Handlers ===
+# --- Core Handlers ---
 async def handle_mention(tw):
     convo_id = tw.conversation_id or tw.id
     convo_count = get_convo_count(convo_id)
     if convo_count >= 2:
         return
 
-    context = get_conversation_context(convo_id, tw.text)
-    prompt = f"Query: {tw.text}\nRespond with professional crypto analysis using: {context}"
-    response = ask_perplexity(prompt, context)
+    history = get_thread_history(convo_id)
+    recent = get_recent_replies(5)
+    recent_str = "\n".join([f"User: {r['user']}\nBot: {r['bot']}" for r in recent])
 
+    prompt = (
+        f"Here are some of your most recent crypto takes:\n{recent_str}\n"
+        f"{history}\nUser: {tw.text}\nBot:"
+    )
+    response = ask_perplexity(prompt)
     if convo_count == 1:
         response += " [Degen Out]"
 
     await safe_tweet(text=response[:240], in_reply_to_tweet_id=tw.id)
-    store_conversation(tw, response)
-    track_convo(convo_id, convo_count + 1)
+    update_thread_history(convo_id, tw.text, response)
+    increment_convo_count(convo_id)
+    save_recent_reply(tw.text, response)
     db.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
 
 async def mention_loop():
@@ -279,7 +267,7 @@ async def hourly_post_loop():
     while True:
         try:
             data = fetch_data(DEGEN_ADDR)
-            prompt = f"Create insightful one-liner about $DEGEN using: {json.dumps(data)}"
+            prompt = f"Create an insightful, one-line, pro/edgy comment about $DEGEN using: {json.dumps(data)}"
             insight = ask_perplexity(prompt)
             metrics = format_metrics(data)
             final = f"{metrics}\n\n💡 {insight[:140]}"
@@ -290,28 +278,11 @@ async def hourly_post_loop():
             logger.error(f"Hourly post error: {e}")
         await asyncio.sleep(3600)
 
-async def memory_maintenance():
-    while True:
-        db.zremrangebyscore(f"{REDIS_PREFIX}conv_zset", "-inf", time.time()-604800)
-        await asyncio.sleep(3600)
-
 async def main():
     await asyncio.gather(
         mention_loop(),
         hourly_post_loop(),
-        memory_maintenance()
     )
 
 if __name__ == "__main__":
-    # Initialize vector index
-    try:
-        schema = (
-            TextField("tweet_id"),
-            VectorField("embedding", "HNSW", {"TYPE": "FLOAT32", "DIM": 384, "DISTANCE_METRIC": "COSINE"}),
-            TextField("text")
-        )
-        db.ft("conv_idx").create_index(schema, definition=IndexDefinition(prefix=[f"{REDIS_PREFIX}conv:"]))
-    except Exception as e:
-        logger.info(f"Vector index already exists: {e}")
-
     asyncio.run(main())

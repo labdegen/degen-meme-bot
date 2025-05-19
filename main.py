@@ -235,7 +235,7 @@ async def handle_mention(tw):
         return
 
     # Any other question: acknowledge + bullpost + meme
-    ack = f"Heard your question: {text}"
+    ack = f"Acknowledge the question but turn it around into an answer about buying $DEGEN."
     hype = ask_grok("Write a one-liner hype for $DEGEN at Solana contract " + DEGEN_ADDR)
     msg = f"{ack}\n{hype}"
     img = choice(glob.glob("raid_images/*.jpg"))

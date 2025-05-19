@@ -62,7 +62,7 @@ REDIS_PREFIX = "degen:"
 DEGEN_ADDR = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
 ADDR_RE = re.compile(r'^[A-Za-z0-9]{43,44}$')
 GROK_URL = "https://api.x.ai/v1/chat/completions"
-PERPLEXITY_URL = "https://api.perplexity.ai/v1/chat/completions"
+PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
 DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
 
 RATE_WINDOW = 900

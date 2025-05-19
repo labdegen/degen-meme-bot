@@ -11,6 +11,8 @@ import time
 from collections import deque
 from random import choice
 import glob
+import numpy as np
+from sentence_transformers import SentenceTransformer
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -22,12 +24,15 @@ required_vars = [
     "X_API_KEY", "X_API_KEY_SECRET",
     "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET",
     "X_BEARER_TOKEN",
-    "GROK_API_KEY",
+    "PERPLEXITY_API_KEY",
     "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"
 ]
 for v in required_vars:
     if not os.getenv(v):
         raise RuntimeError(f"Missing env var: {v}")
+
+# Initialize embedding model
+embedder = SentenceTransformer('all-MiniLM-L6-v2')
 
 # Credentials
 API_KEY = os.getenv("X_API_KEY")
@@ -35,7 +40,7 @@ API_KEY_SECRET = os.getenv("X_API_KEY_SECRET")
 ACCESS_TOKEN = os.getenv("X_ACCESS_TOKEN")
 ACCESS_TOKEN_SECRET = os.getenv("X_ACCESS_TOKEN_SECRET")
 BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
-GROK_KEY = os.getenv("GROK_API_KEY")
+PERPLEXITY_KEY = os.getenv("PERPLEXITY_API_KEY")
 
 # Redis client
 db = redis.Redis(
@@ -46,13 +51,6 @@ db = redis.Redis(
 )
 db.ping()
 logger.info("Redis connected")
-
-# Load knowledge file
-try:
-    with open("degen_knowledge.txt", "r", encoding="utf-8") as f:
-        DEGEN_KNOWLEDGE = f.read()
-except:
-    DEGEN_KNOWLEDGE = ""
 
 # Twitter clients
 x_client = tweepy.Client(
@@ -73,7 +71,7 @@ x_api = tweepy.API(oauth)
 REDIS_PREFIX = "degen:"
 DEGEN_ADDR = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
 ADDR_RE = re.compile(r'^[A-Za-z0-9]{43,44}$')
-GROK_URL = "https://api.x.ai/v1/chat/completions"
+PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
 SEARCH_URL = "https://api.dexscreener.com/latest/dex/search?search={}"
 DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
 
@@ -83,6 +81,32 @@ MENTIONS_LIMIT = 10
 TWEETS_LIMIT = 50
 mentions_timestamps = deque()
 tweet_timestamps = deque()
+
+# === Enhanced Memory System ===
+def store_conversation(tweet, response):
+    embedding = embedder.encode(f"{tweet.text} {response}")
+    key = f"{REDIS_PREFIX}conv:{tweet.conversation_id or tweet.id}"
+    pipeline = db.pipeline()
+    pipeline.hset(key, mapping={
+        "tweet_id": str(tweet.id),
+        "text": f"User: {tweet.text}\nBot: {response}",
+        "embedding": np.array(embedding).tobytes()
+    })
+    pipeline.expire(key, 604800)  # 1 week retention
+    pipeline.execute()
+
+def get_conversation_context(conversation_id, current_text):
+    try:
+        embedding = embedder.encode(current_text)
+        query = np.array(embedding).tobytes()
+        res = db.ft("conv_idx").search(
+            f"@tweet_id:{conversation_id}",
+            vector_query=f"embedding:[KNN 3 $vec]=>{{$yield_distance_as: score}}",
+            query_params={"vec": query}
+        )
+        return "\n".join([doc.text for doc in res.docs])
+    except:
+        return ""
 
 # === Rate Guard Helpers ===
 async def safe_mention_lookup(fn, *args, **kwargs):
@@ -123,97 +147,83 @@ async def safe_tweet(text: str, **kwargs):
     tweet_timestamps.append(time.time())
     return resp
 
-# === Core Helpers ===
+# === Enhanced AI Helpers ===
+def ask_perplexity(prompt, context=""):
+    headers = {"Authorization": f"Bearer {PERPLEXITY_KEY}", "Content-Type": "application/json"}
+    body = {
+        "model": "sonar-medium-chat",
+        "messages": [
+            {
+                "role": "system",
+                "content": f"""You're a crypto analyst combining deep technical insight with market savvy. Respond with:
+- Chain analysis (volume, liquidity pools)
+- Sentiment interpretation (social, whale activity)
+- Technical patterns (chart formations, indicators)
+- Concise professional tone (no emojis)
+- Creative analogies for complex concepts
 
-def resolve_token(q):
-    s = q.upper().lstrip('$')
-    if s == 'DEGEN':
-        return 'DEGEN', DEGEN_ADDR
-    if ADDR_RE.match(s):
-        return None, s
+Context:{context}"""
+            },
+            {"role": "user", "content": prompt}
+        ],
+        "max_tokens": 180,
+        "temperature": 0.65,
+        "frequency_penalty": 1.1,
+        "presence_penalty": 0.9
+    }
     try:
-        resp = requests.get(SEARCH_URL.format(s), timeout=10)
-        resp.raise_for_status()
-        for item in resp.json():
-            if item.get('chainId') == 'solana':
-                base = item.get('baseToken', {})
-                addr = item.get('pairAddress') or base.get('address')
-                if addr:
-                    return base.get('symbol'), addr
-    except:
-        pass
-    return None, None
-
-
-def fetch_data(addr=DEGEN_ADDR):
-    try:
-        r = requests.get(f"{DEXS_URL}{addr}", timeout=10)
+        r = requests.post(PERPLEXITY_URL, json=body, headers=headers, timeout=25)
         r.raise_for_status()
-        data = r.json()[0]
-        base = data.get('baseToken', {})
-        return {
-            'symbol': base.get('symbol'),
-            'price_usd': float(data.get('priceUsd', 0)),
-            'volume_usd': float(data.get('volume', {}).get('h24', 0)),
-            'market_cap': float(data.get('marketCap', 0)),
-            'change_1h': float(data.get('priceChange', {}).get('h1', 0)),
-            'change_24h': float(data.get('priceChange', {}).get('h24', 0)),
-            'link': f"https://dexscreener.com/solana/{addr}"
-        }
+        return r.json()['choices'][0]['message']['content'].strip()
     except Exception as e:
-        logger.error(f"Fetch error: {e}")
-        return {}
+        logger.warning(f"Perplexity error: {e}")
+        return "Analyzing market patterns... Check back soon. [Degen Out]"
 
+# === Conversation Management ===
+def track_convo(tweet_id, reply_count):
+    db.setex(f"{REDIS_PREFIX}convo:{tweet_id}", 86400, reply_count)
 
+def get_convo_count(tweet_id):
+    return int(db.get(f"{REDIS_PREFIX}convo:{tweet_id}") or 0)
+
+# === Enhanced Metrics Formatting ===
 def format_metrics(d):
     return (
-        f"🚀 {d['symbol']} | ${d['price_usd']:,.6f}\n"
-        f"MC ${d['market_cap']:,.0f} | Vol24 ${d['volume_usd']:,.0f}\n"
-        f"1h {'🟢' if d['change_1h'] >= 0 else '🔴'}{d['change_1h']:+.2f}% | "
-        f"24h {'🟢' if d['change_24h'] >= 0 else '🔴'}{d['change_24h']:+.2f}%\n{d['link']}"
+        f"🔮 $DEGEN Insights\n"
+        f"Price: ${d['price_usd']:,.4f} | MCap: ${d['market_cap']:,.0f}\n"
+        f"24h Vol: ${d['volume_usd']:,.0f} | 1h: {d['change_1h']:+.2f}%\n"
+        f"Pattern Recognition: {identify_chart_pattern(d)}"
     )
 
+def identify_chart_pattern(data):
+    changes = [data['change_1h'], data['change_24h']]
+    if all(c > 0 for c in changes):
+        return "Bullish Ascending Triangle"
+    elif changes[0] > 0 > changes[1]:
+        return "Bull Flag Formation"
+    else:
+        return "Consolidation Phase"
 
-def ask_grok(prompt):
-    try:
-        history_key = f"{REDIS_PREFIX}grok_history"
-        past = set(db.lrange(history_key, 0, -1))
-        body = {
-            "model": "grok-3",
-            "messages": [
-                {"role": "system", "content": "You're a bold, aggressive crypto community voice. Use one fact from context."},
-                {"role": "user", "content": prompt + "\n" + DEGEN_KNOWLEDGE + "\nEnd with NFA."}
-            ],
-            "max_tokens": 200,
-            "temperature": 0.9
-        }
-        headers = {"Authorization": f"Bearer {GROK_KEY}", "Content-Type": "application/json"}
-        res = requests.post(GROK_URL, json=body, headers=headers)
-        res.raise_for_status()
-        reply = res.json()['choices'][0]['message']['content'].strip()
-        if reply not in past:
-            db.lpush(history_key, reply)
-            db.ltrim(history_key, 0, 25)
-        return reply
-    except Exception as e:
-        logger.error(f"Grok error: {e}")
-        return "$DEGEN. NFA."
-
-
-async def post_raid(tweet):
-    txt_lower = tweet.text.lower()
-    if '@askdegen' in txt_lower and 'raid' in txt_lower:
-        prompt = f"Write a short one-liner hype for $DEGEN based on this: '{tweet.text}'. Mention @ogdegenonsol but don't say 'raid'. End with NFA."
-        msg = ask_grok(prompt)
-        img_list = glob.glob("raid_images/*.jpg")
-        media = x_api.media_upload(choice(img_list)) if img_list else None
-        await safe_tweet(
-            text=msg[:240],
-            in_reply_to_tweet_id=tweet.id,
-            media_ids=[media.media_id_string] if media else None
-        )
-        db.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
-        logger.info("Raid reply sent")
+# === Core Handlers ===
+async def handle_mention(tw):
+    convo_id = tw.conversation_id or tw.id
+    convo_count = get_convo_count(convo_id)
+    
+    if convo_count >= 2:
+        return
+    
+    context = get_conversation_context(convo_id, tw.text)
+    prompt = f"Query: {tw.text}\nRespond with professional crypto analysis using: {context}"
+    
+    response = ask_perplexity(prompt, context)
+    
+    if convo_count == 1:
+        response += " [Degen Out]"
+    
+    await safe_tweet(text=response[:240], in_reply_to_tweet_id=tw.id)
+    store_conversation(tw, response)
+    track_convo(convo_id, convo_count + 1)
+    db.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
 
 async def mention_loop():
     while True:
@@ -223,43 +233,16 @@ async def mention_loop():
                 x_client.get_users_mentions,
                 id=BOT_ID,
                 since_id=last_id,
-                tweet_fields=['id', 'text'],
+                tweet_fields=['id', 'text', 'conversation_id'],
                 expansions=['author_id'],
                 user_fields=['username'],
                 max_results=10
             )
             if res and res.data:
                 for tw in reversed(res.data):
-                    tid = tw.id
-                    if db.sismember(f"{REDIS_PREFIX}replied_ids", str(tid)):
-                        continue
-                    db.set(f"{REDIS_PREFIX}last_mention_id", tid)
-                    txt = tw.text.replace('@askdegen', '').strip()
-                    if 'raid' in tw.text.lower() and '@askdegen' in tw.text.lower():
-                        await post_raid(tw)
-                        continue
-
-                    token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
-                    if token:
-                        sym, addr = resolve_token(token)
-                        if addr:
-                            data = fetch_data(addr)
-                            if sym == 'DEGEN':
-                                msg = ask_grok(f"Shill $DEGEN hard: {json.dumps(data)}")
-                            else:
-                                msg = format_metrics(data)
-                        else:
-                            msg = ask_grok(txt)
-                    elif txt.upper() == 'DEX':
-                        data = fetch_data(DEGEN_ADDR)
-                        msg = format_metrics(data)
-                    elif txt.upper() == 'CA':
-                        msg = f"Contract Address: {DEGEN_ADDR}"
-                    else:
-                        msg = ask_grok(txt)
-
-                    await safe_tweet(text=msg[:240], in_reply_to_tweet_id=tid)
-                    db.sadd(f"{REDIS_PREFIX}replied_ids", str(tid))
+                    if not db.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
+                        db.set(f"{REDIS_PREFIX}last_mention_id", tw.id)
+                        await handle_mention(tw)
         except Exception as e:
             logger.error(f"Mention loop error: {e}")
         await asyncio.sleep(110)
@@ -268,26 +251,40 @@ async def hourly_post_loop():
     while True:
         try:
             data = fetch_data(DEGEN_ADDR)
+            prompt = f"Create insightful one-liner about $DEGEN using: {json.dumps(data)}"
+            insight = ask_perplexity(prompt)
             metrics = format_metrics(data)
-            prompt = "Give a punchy one-sentence update on $DEGEN using these metrics, vary every hour."
-            tweet = ask_grok(prompt)
-            final = f"{metrics}\n\n{tweet}"
-            last = db.get(f"{REDIS_PREFIX}last_hourly_post")
-            if final.strip() != last:
+            final = f"{metrics}\n\n💡 {insight[:140]}"
+            
+            if final != db.get(f"{REDIS_PREFIX}last_hourly_post"):
                 await safe_tweet(text=final[:560])
-                db.set(f"{REDIS_PREFIX}last_hourly_post", final.strip())
-                logger.info("Hourly post success")
-            else:
-                logger.info("Skipped duplicate hourly post.")
+                db.setex(f"{REDIS_PREFIX}last_hourly_post", 3600, final)
         except Exception as e:
             logger.error(f"Hourly post error: {e}")
+        await asyncio.sleep(3600)
+
+async def memory_maintenance():
+    while True:
+        db.zremrangebyscore(f"{REDIS_PREFIX}conv_zset", "-inf", time.time()-604800)
         await asyncio.sleep(3600)
 
 async def main():
     await asyncio.gather(
         mention_loop(),
-        hourly_post_loop()
+        hourly_post_loop(),
+        memory_maintenance()
     )
 
 if __name__ == "__main__":
+    # Initialize vector index
+    try:
+        schema = (
+            TextField("tweet_id"),
+            VectorField("embedding", "HNSW", {"TYPE": "FLOAT32", "DIM": 384, "DISTANCE_METRIC": "COSINE"}),
+            TextField("text")
+        )
+        db.ft("conv_idx").create_index(schema, definition=IndexDefinition(prefix=[f"{REDIS_PREFIX}conv:"]))
+    except Exception as e:
+        logger.info(f"Vector index already exists: {e}")
+    
     asyncio.run(main())

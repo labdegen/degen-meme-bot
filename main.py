@@ -35,7 +35,7 @@ oauth = tweepy.OAuth1UserHandler(
     os.getenv("X_ACCESS_TOKEN"),
     os.getenv("X_ACCESS_TOKEN_SECRET")
 )
-x_api = tweepy.API(oauth)
+ x_api = tweepy.API(oauth)
 
 x_client = tweepy.Client(
     bearer_token=os.getenv("X_BEARER_TOKEN"),
@@ -70,9 +70,8 @@ SYMBOL_RE = re.compile(r"\$([A-Za-z0-9]{2,10})", re.IGNORECASE)
 
 RATE_WINDOW = 900  # seconds
 MENTIONS_LIMIT = 10
-TWEETS_LIMIT = 50
-mentions_timestamps = deque()
-tweet_timestamps = deque()
+TWEETS_LIMIT = 50\mentions_timestamps = deque()
+ tweet_timestamps = deque()
 
 # Helpers
 
@@ -116,7 +115,10 @@ def ask_grok(prompt: str) -> str:
         "max_tokens": 180,
         "temperature": 0.8
     }
-    headers = {"Authorization": f"Bearer {os.getenv('GROK_API_KEY')}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {os.getenv('GROK_API_KEY')}",
+        "Content-Type": "application/json"
+    }
     try:
         r = requests.post(GROK_URL, json=payload, headers=headers, timeout=60)
         r.raise_for_status()
@@ -190,7 +192,6 @@ def lookup_address(token: str) -> str:
     t = token.lstrip('$')
     if t.upper() == 'DEGEN':
         return DEGEN_ADDR
-    # if it's an address, return directly
     if ADDR_RE.fullmatch(t):
         return t
     try:
@@ -207,12 +208,12 @@ def lookup_address(token: str) -> str:
     return None
 
 # Build DEX reply with preview link
-
 def build_dex_reply(addr: str) -> str:
     data = fetch_data(addr)
     return format_metrics(data) + data['link']
 
-# Raid feature\async def post_raid(tweet):
+# Raid feature
+async def post_raid(tweet):
     prompt = (
         f"Write a one-liner bullpost for $DEGEN based on:\n'{tweet.text}'\n"
         f"Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. End with NFA."

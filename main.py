@@ -263,44 +263,69 @@ async def handle_mention(tw):
         await post_raid(tw)
         return
 
-    # 2) token/address -> DEX preview
+    # 2) Check for DEX or CA commands - Fixed to properly handle these commands
+    if re.search(r"\b(dex|ca|contract|address)\b", txt, re.IGNORECASE):
+        img = choice(glob.glob("raid_images/*.jpg"))
+        media_id = x_api.media_upload(img).media_id_string
+        await safe_tweet(
+            text=build_dex_reply(DEGEN_ADDR),
+            media_id=media_id,
+            in_reply_to_tweet_id=tw.id
+        )
+        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+        return
+
+    # 3) token/address -> DEX preview
     token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
     if token:
         sym = token.lstrip('$').upper()
         addr = DEGEN_ADDR if sym=="DEGEN" else lookup_address(token)
         if addr:
-            await safe_tweet(build_dex_reply(addr), in_reply_to_tweet_id=tw.id)
+            img = choice(glob.glob("raid_images/*.jpg"))
+            media_id = x_api.media_upload(img).media_id_string
+            await safe_tweet(
+                text=build_dex_reply(addr),
+                media_id=media_id,
+                in_reply_to_tweet_id=tw.id
+            )
+            redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
             return
-
-    # 3) CA/DEX commands
-    if txt.upper() in ("CA", "DEX"):
-        await safe_tweet(build_dex_reply(DEGEN_ADDR), in_reply_to_tweet_id=tw.id)
-        return
 
     # 4) general fallback
     prompt = (
         f"History:{history}\n"
         f"User asked: \"{txt}\"\n"
         "First, answer naturally and concisely. "
-        "Then, in a second gambler-style line, mention stacking $DEGEN. Do NOT include the contract address - I'll add it later. End with NFA."
+        "Then, in a second gambler-style line, mention stacking $DEGEN. End with NFA."
     )
     raw = ask_grok(prompt)
-    reply_body = truncate_to_sentence(raw, 200)
     
-    # Check if the response already contains $DEGEN mention
+    # Ensure we have a complete response that doesn't get cut off
+    reply_body = raw.strip()
+    
+    # Make sure the response contains $DEGEN mention and contract address
     if "$DEGEN" not in reply_body:
-        reply = f"{reply_body} Good time to stack $DEGEN. Contract Address: {DEGEN_ADDR}"
+        reply = f"{reply_body}\n\nStack $DEGEN! Contract Address: {DEGEN_ADDR}"
     else:
-        # If $DEGEN is already mentioned, just add the contract address
-        reply = f"{reply_body} Contract Address: {DEGEN_ADDR}"
+        # If $DEGEN is already mentioned, just add the contract address if needed
+        if DEGEN_ADDR not in reply_body:
+            reply = f"{reply_body}\n\nContract Address: {DEGEN_ADDR}"
+        else:
+            reply = reply_body
+    
+    # Ensure we're not exceeding Twitter's character limit
+    if len(reply) > 260:
+        reply = truncate_to_sentence(reply, 220) + f"\n\nContract Address: {DEGEN_ADDR}"
     
     img = choice(glob.glob("raid_images/*.jpg"))
     media_id = x_api.media_upload(img).media_id_string
+    
     await safe_tweet(
         text=reply,
         media_id=media_id,
         in_reply_to_tweet_id=tw.id
     )
+    redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
     update_thread(convo_id, txt, reply)
     increment_thread(convo_id)
 

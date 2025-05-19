@@ -29,7 +29,6 @@ for v in required_vars:
     if not os.getenv(v):
         raise RuntimeError(f"Missing env var: {v}")
 
-# Credentials
 API_KEY = os.getenv("X_API_KEY")
 API_KEY_SECRET = os.getenv("X_API_KEY_SECRET")
 ACCESS_TOKEN = os.getenv("X_ACCESS_TOKEN")
@@ -38,7 +37,6 @@ BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
 GROK_KEY = os.getenv("GROK_API_KEY")
 PERPLEXITY_KEY = os.getenv("PERPLEXITY_API_KEY")
 
-# Redis client
 db = redis.Redis(
     host=os.getenv("REDIS_HOST"),
     port=int(os.getenv("REDIS_PORT")),
@@ -48,14 +46,6 @@ db = redis.Redis(
 db.ping()
 logger.info("Redis connected")
 
-# Load knowledge file (optional, not used for fallback)
-try:
-    with open("degen_knowledge.txt", "r", encoding="utf-8") as f:
-        DEGEN_KNOWLEDGE = f.read()
-except:
-    DEGEN_KNOWLEDGE = ""
-
-# Twitter clients
 x_client = tweepy.Client(
     bearer_token=BEARER_TOKEN,
     consumer_key=API_KEY,
@@ -70,23 +60,19 @@ logger.info(f"Authenticated as: {me.username} (ID: {BOT_ID})")
 oauth = tweepy.OAuth1UserHandler(API_KEY, API_KEY_SECRET, ACCESS_TOKEN, ACCESS_TOKEN_SECRET)
 x_api = tweepy.API(oauth)
 
-# Constants
 REDIS_PREFIX = "degen:"
 DEGEN_ADDR = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
 ADDR_RE = re.compile(r'^[A-Za-z0-9]{43,44}$')
 GROK_URL = "https://api.x.ai/v1/chat/completions"
 PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
-SEARCH_URL = "https://api.dexscreener.com/latest/dex/search?search={}"
 DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
 
-# Rate limit windows
 RATE_WINDOW = 900  # 15 minutes
 MENTIONS_LIMIT = 10
 TWEETS_LIMIT = 50
 mentions_timestamps = deque()
 tweet_timestamps = deque()
 
-# --- Recent Replies Memory ---
 RECENT_REPLIES_KEY = f"{REDIS_PREFIX}recent_replies"
 RECENT_REPLIES_LIMIT = 50
 
@@ -100,7 +86,6 @@ def get_recent_replies(n=5):
     replies = [json.loads(x) for x in items]
     return replies
 
-# --- Per-thread memory for up to 2 replies ---
 def get_thread_key(convo_id):
     return f"{REDIS_PREFIX}thread:{convo_id}"
 
@@ -116,11 +101,10 @@ def get_thread_history(convo_id):
 
 def update_thread_history(convo_id, user_text, bot_text):
     history = get_thread_history(convo_id)
-    new_history = (history + f"\nUser: {user_text}\nBot: {bot_text}")[-1000:]  # last 1000 chars
+    new_history = (history + f"\nUser: {user_text}\nBot: {bot_text}")[-1000:]
     db.hset(get_thread_key(convo_id), "history", new_history)
     db.expire(get_thread_key(convo_id), 86400)
 
-# === Rate Guard Helpers ===
 async def safe_mention_lookup(fn, *args, **kwargs):
     now = time.time()
     while mentions_timestamps and now - mentions_timestamps[0] > RATE_WINDOW:
@@ -159,8 +143,6 @@ async def safe_tweet(text: str, **kwargs):
     tweet_timestamps.append(time.time())
     return resp
 
-# === AI Helpers ===
-
 def ask_perplexity(prompt):
     headers = {"Authorization": f"Bearer {PERPLEXITY_KEY}", "Content-Type": "application/json"}
     body = {
@@ -170,6 +152,8 @@ def ask_perplexity(prompt):
                 "role": "system",
                 "content": (
                     "You are a crypto analyst: concise, sharp, professional, and a bit edgy. "
+                    "Always answer ONLY about the $DEGEN token on Solana, contract address 6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f. "
+                    "Ignore any other chain or token. "
                     "Give unique, insightful, and evolving answers. Never mention a knowledge base or context."
                 )
             },
@@ -196,6 +180,8 @@ def ask_grok(prompt):
                 "role": "system",
                 "content": (
                     "You are a crypto analyst: concise, sharp, professional, and a bit edgy. "
+                    "Always answer ONLY about the $DEGEN token on Solana, contract address 6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f. "
+                    "Ignore any other chain or token. "
                     "Give unique, insightful, and evolving answers. Never mention a knowledge base or context."
                 )
             },
@@ -216,27 +202,6 @@ def ask_grok(prompt):
     except Exception as e:
         logger.error(f"Grok error: {e}")
         return "Unable to provide an update at this time."
-
-# === Core Helpers ===
-
-def resolve_token(q):
-    s = q.upper().lstrip('$')
-    if s == 'DEGEN':
-        return 'DEGEN', DEGEN_ADDR
-    if ADDR_RE.match(s):
-        return None, s
-    try:
-        r = requests.get(SEARCH_URL.format(s), timeout=10)
-        r.raise_for_status()
-        for item in r.json():
-            if item.get('chainId') == 'solana':
-                base = item.get('baseToken', {})
-                addr = item.get('pairAddress') or base.get('address')
-                if addr:
-                    return base.get('symbol'), addr
-    except:
-        pass
-    return None, None
 
 def fetch_data(addr=DEGEN_ADDR):
     try:
@@ -270,7 +235,10 @@ def format_metrics(d):
 async def post_raid(tweet):
     text_low = tweet.text.lower()
     if '@askdegen' in text_low and 'raid' in text_low:
-        prompt = f"Write a short one-liner hype for $DEGEN based on this: '{tweet.text}'. Mention @ogdegenonsol but don't say 'raid'."
+        prompt = (
+            "Write a short one-liner hype for $DEGEN on Solana (contract: 6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f) "
+            f"based on this: '{tweet.text}'. Mention @ogdegenonsol but don't say 'raid'."
+        )
         msg = ask_perplexity(prompt)
         img_list = glob.glob("raid_images/*.jpg")
         media = x_api.media_upload(choice(img_list)) if img_list else None
@@ -331,17 +299,10 @@ async def mention_loop():
                         continue
 
                     txt = tw.text.replace('@askdegen', '').strip()
-                    token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
-                    if token:
-                        sym, addr = resolve_token(token)
-                        if addr:
-                            data = fetch_data(addr)
-                            if sym == 'DEGEN':
-                                msg = ask_perplexity(f"Shill $DEGEN hard: {json.dumps(data)}")
-                            else:
-                                msg = format_metrics(data)
-                        else:
-                            msg = ask_perplexity(txt)
+                    # Always force DEGEN on Solana
+                    if "$DEGEN" in txt.upper() or "DEGEN" in txt.upper():
+                        data = fetch_data(DEGEN_ADDR)
+                        msg = ask_perplexity(f"All information must be about $DEGEN on Solana, contract address {DEGEN_ADDR}. Data: {json.dumps(data)}. User said: {txt}")
                     elif txt.upper() == 'DEX':
                         data = fetch_data(DEGEN_ADDR)
                         msg = format_metrics(data)
@@ -362,7 +323,9 @@ async def hourly_post_loop():
         try:
             data = fetch_data(DEGEN_ADDR)
             metrics = format_metrics(data)
-            prompt = "Give a punchy one-sentence update on $DEGEN using these metrics, vary every hour."
+            prompt = (
+                f"Give a punchy one-sentence update on $DEGEN on Solana (contract: {DEGEN_ADDR}) using these metrics, vary every hour."
+            )
             tweet = ask_perplexity(prompt)
             final = f"{metrics}\n\n{tweet}"
             last = db.get(f"{REDIS_PREFIX}last_hourly_post")

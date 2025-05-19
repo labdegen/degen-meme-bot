@@ -222,68 +222,72 @@ async def post_raid(tweet):
 async def handle_mention(tw):
     convo_id = tw.conversation_id or tw.id
 
-    # record root on first reply
+    # on first reply, record the root tweet
     if db.hget(get_thread_key(convo_id), "count") is None:
         root_text = x_client.get_tweet(convo_id, tweet_fields=['text']).data.text
         update_thread(convo_id, f"ROOT: {root_text}", "")
 
     history = get_thread_history(convo_id)
-    text = tw.text.replace("@askdegen","").strip()
+    txt = tw.text.replace("@askdegen","").strip()
 
     # 1) raid
-    if re.search(r"\braid\b", text, re.IGNORECASE):
+    if re.search(r"\braid\b", txt, re.IGNORECASE):
         await post_raid(tw)
         return
 
-    # 2) token/address → metrics (no meme, link preview)
-    token = next((w for w in text.split() if w.startswith('$') or ADDR_RE.match(w)), None)
+    # 2) token/address → metrics + meme
+    token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
     if token:
         sym = token.lstrip('$').upper()
         addr = DEGEN_ADDR if sym=="DEGEN" else (lookup_address(sym) if token.startswith('$') else token)
         if addr:
-            await safe_tweet(
-                text=format_metrics(fetch_data(addr)),
-                in_reply_to_tweet_id=tw.id
-            )
+            data = fetch_data(addr)
+            img = choice(glob.glob("raid_images/*.jpg"))
+            mid = x_api.media_upload(img).media_id_string
+            await safe_tweet(format_metrics(data), media_id=mid, in_reply_to_tweet_id=tw.id)
             return
 
     # 3) CA
-    if text.upper() == "CA":
-        await safe_tweet(
-            text=f"Contract Address: {DEGEN_ADDR}",
-            in_reply_to_tweet_id=tw.id
-        )
+    if txt.upper() == "CA":
+        img = choice(glob.glob("raid_images/*.jpg"))
+        mid = x_api.media_upload(img).media_id_string
+        await safe_tweet(f"Contract Address: {DEGEN_ADDR}", media_id=mid, in_reply_to_tweet_id=tw.id)
         return
 
     # 4) DEX
-    if text.upper() == "DEX":
-        await safe_tweet(
-            text=format_metrics(fetch_data(DEGEN_ADDR)),
-            in_reply_to_tweet_id=tw.id
-        )
+    if txt.upper() == "DEX":
+        data = fetch_data(DEGEN_ADDR)
+        img = choice(glob.glob("raid_images/*.jpg"))
+        mid = x_api.media_upload(img).media_id_string
+        await safe_tweet(format_metrics(data), media_id=mid, in_reply_to_tweet_id=tw.id)
         return
 
-    # 5) general: include context + unique segue + CA + meme
+    # 5) general conversation
     prompt = (
-        f"History:{history}\nUser asked: \"{text}\"\n"
-        "First, answer naturally and concisely. "
-        "Then, in a second, gambler-style sentence, include a fresh tagline about stacking $DEGEN. "
-        "End with NFA."
+        f"History:\n{history}\n\n"
+        f"User asked: \"{txt}\"\n\n"
+        "1) Answer that question in one concise sentence.\n"
+        "2) Then in a second sentence, immediately segue with something like "
+        "\"In the meantime, I just keep stacking $DEGEN.\" (must flow naturally, make sense in context, no brackets.)\n"
+        "3) End with \"NFA.\""
     )
-    raw = ask_grok(prompt)
+    raw = ask_primary(prompt)
     reply_body = truncate_to_sentence(raw, 200)
-    reply = f"{reply_body} Contract Address: {DEGEN_ADDR}"
+    # tack on CA at the very end
+    full_reply = f"{reply_body} CA: {DEGEN_ADDR}"
 
     img = choice(glob.glob("raid_images/*.jpg"))
-    media_id = x_api.media_upload(img).media_id_string
+    mid = x_api.media_upload(img).media_id_string
+
     await safe_tweet(
-        text=reply,
-        media_id=media_id,
+        full_reply,
+        media_id=mid,
         in_reply_to_tweet_id=tw.id
     )
 
-    update_thread(convo_id, text, reply)
+    update_thread(convo_id, txt, full_reply)
     increment_thread(convo_id)
+
 
 async def mention_loop():
     while True:

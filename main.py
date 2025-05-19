@@ -83,10 +83,28 @@ def truncate_to_sentence(text: str, max_length: int) -> str:
             return snippet[:idx+1]
     return snippet
 
-# Grok-only prompt: bulletproof $DEGEN on Solana
+# Thread memory helpers
+def get_thread_key(convo_id):
+    return f"{REDIS_PREFIX}thread:{convo_id}"
+
+def get_thread_history(convo_id):
+    return db.hget(get_thread_key(convo_id), "history") or ""
+
+def increment_thread(convo_id):
+    db.hincrby(get_thread_key(convo_id), "count", 1)
+    db.expire(get_thread_key(convo_id), 86400)
+
+def update_thread(convo_id, user_text, bot_text):
+    hist = get_thread_history(convo_id)
+    entry = f"\nUser: {user_text}\nBot: {bot_text}"
+    new = (hist + entry)[-2000:]
+    db.hset(get_thread_key(convo_id), "history", new)
+    db.expire(get_thread_key(convo_id), 86400)
+
+# Grok-only prompt
 SYSTEM_PROMPT = (
-    "You are a crypto analyst: concise, sharp and professional. "
-    f"Always speak about the $DEGEN token at contract address {DEGEN_ADDR} on Solana. "
+    "You are a crypto analyst: concise, sharp, professional, genius-level. "
+    f"Always speak about the $DEGEN token at contract address {DEGEN_ADDR}. "
     "Do NOT mention any other token or chain."
 )
 
@@ -94,15 +112,15 @@ def ask_grok(prompt: str) -> str:
     body = {
         "model": "grok-3-latest",
         "messages": [
-            {"role": "system",  "content": SYSTEM_PROMPT},
-            {"role": "user",    "content": prompt}
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": prompt}
         ],
         "max_tokens": 180,
         "temperature": 0.8
     }
     headers = {"Authorization": f"Bearer {GROK_KEY}", "Content-Type": "application/json"}
     try:
-        r = requests.post(GROK_URL, json=body, headers=headers, timeout=60)
+        r = requests.post(GROK_URL, json=body, headers=headers, timeout=65)
         r.raise_for_status()
         return r.json()['choices'][0]['message']['content'].strip()
     except Exception as e:
@@ -143,9 +161,7 @@ def fetch_data(addr: str) -> dict:
     try:
         r = requests.get(f"{DEXS_URL}{addr}", timeout=10)
         r.raise_for_status()
-        data = r.json()
-        if isinstance(data, list) and data:
-            data = data[0]
+        data = r.json()[0] if isinstance(r.json(), list) else r.json()
         base = data.get('baseToken', {})
         return {
             'symbol':     base.get('symbol','DEGEN'),
@@ -169,16 +185,17 @@ def format_metrics(d: dict) -> str:
         f"{d['link']}"
     )
 
-def lookup_address(query: str) -> str:
-    if query.lower() == 'degen':
+def lookup_address(q: str) -> str:
+    ql = q.lower()
+    if ql == 'degen':
         return DEGEN_ADDR
-    if ADDR_RE.fullmatch(query):
-        return query
+    if ADDR_RE.fullmatch(q):
+        return q
     try:
-        r = requests.get(DEXS_SEARCH_URL + query, timeout=10)
+        r = requests.get(DEXS_SEARCH_URL + q, timeout=10)
         r.raise_for_status()
         for tok in r.json().get("tokens", []):
-            if tok.get("symbol","").lower() == query.lower():
+            if tok.get("symbol","").lower() == ql:
                 return tok.get("contractAddress")
         if r.json().get("tokens"):
             return r.json()["tokens"][0].get("contractAddress")
@@ -201,9 +218,15 @@ async def post_raid(tweet):
     )
     db.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
 
-# … [keep everything above unchanged] …
-
 async def handle_mention(tw):
+    convo_id = tw.conversation_id or tw.id
+
+    # fetch & record root on first reply
+    if db.hget(get_thread_key(convo_id), "count") is None:
+        root = x_client.get_tweet(convo_id, tweet_fields=['text']).data.text
+        update_thread(convo_id, f"ROOT: {root}", "")
+    history = get_thread_history(convo_id)
+
     text = tw.text.replace("@askdegen","").strip()
 
     # 1) raid
@@ -232,23 +255,19 @@ async def handle_mention(tw):
         await safe_tweet(text=format_metrics(data), in_reply_to_tweet_id=tw.id)
         return
 
-    # 5) any other question → natural answer + DEGEN bullpost + meme
+    # 5) general: include thread context
     prompt = (
-        f"First, answer the question \"{text}\" in one concise sentence. "
-        f"Then, in a second sentence, say something like \"Either way, it's a great time to stack more $DEGEN.\" "
-        "End with NFA."
+        f"Conversation so far:{history}\nUser asked: \"{text}\"\n"
+        "First, respond naturally and concisely to that. "
+        "Then, add a promotional line about stacking more $DEGEN. End with NFA."
     )
-    msg = ask_grok(prompt)
+    raw = ask_grok(prompt)
+    reply = truncate_to_sentence(raw, 240) + f"\nContract Address: {DEGEN_ADDR}"
 
-    img = choice(glob.glob("raid_images/*.jpg"))
-    media_id = x_api.media_upload(img).media_id_string
+    await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
 
-    await safe_tweet(
-        text=truncate_to_sentence(msg, 240),
-        in_reply_to_tweet_id=tw.id,
-        media_ids=[media_id]
-    )
-    db.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+    update_thread(convo_id, text, reply)
+    increment_thread(convo_id)
 
 async def mention_loop():
     while True:
@@ -256,7 +275,7 @@ async def mention_loop():
             last_id = db.get(f"{REDIS_PREFIX}last_mention_id")
             params = {
                 "id": BOT_ID,
-                "tweet_fields": ['id','text'],
+                "tweet_fields": ['id','text','conversation_id'],
                 "expansions": ['author_id'],
                 "user_fields": ['username'],
                 "max_results": 10
@@ -279,7 +298,7 @@ async def hourly_post_loop():
         try:
             data    = fetch_data(DEGEN_ADDR)
             metrics = format_metrics(data)
-            prompt  = "Write a punchy one-sentence update on $DEGEN. Be positive and promotional."
+            prompt  = "Write a punchy one-sentence update on $DEGEN. Be promotional."
             raw     = ask_grok(prompt)
             tweet   = truncate_to_sentence(f"{metrics}\n\n{raw}", 560)
             last    = db.get(f"{REDIS_PREFIX}last_hourly_post")

@@ -206,7 +206,7 @@ def lookup_address(query):
 async def post_raid(tweet):
     prompt = (
         f"Write a one-liner bullpost for $DEGEN based on:\n'{tweet.text}'\n"
-        f"At the end Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. End with NFA."
+        f"DO NOT TAG @askdegen.  Do not use the word raid. At the end Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. End with NFA."
     )
     msg = ask_with_system(DEGEN_SYSTEM, prompt, prefer_grok=False)
     img = choice(glob.glob("raid_images/*.jpg"))

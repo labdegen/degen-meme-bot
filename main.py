@@ -73,7 +73,8 @@ SYMBOL_RE = re.compile(r"\$([A-Za-z0-9]{2,10})", re.IGNORECASE)
 
 RATE_WINDOW = 900
 MENTIONS_LIMIT = 10
-TWEETS_LIMIT = 50\mentions_timestamps = deque()
+TWEETS_LIMIT = 50
+mentions_timestamps = deque()
 tweet_timestamps = deque()
 
 # Helpers
@@ -88,7 +89,9 @@ def truncate_to_sentence(text: str, max_length: int) -> str:
     return snippet
 
 # Thread memory
- def get_thread_key(cid): return f"{REDIS_PREFIX}thread:{cid}"
+
+def get_thread_key(cid):
+    return f"{REDIS_PREFIX}thread:{cid}"(cid): return f"{REDIS_PREFIX}thread:{cid}"
 def get_thread_history(cid): return redis_client.hget(get_thread_key(cid), "history") or ""
 def increment_thread(cid):
     redis_client.hincrby(get_thread_key(cid), "count",1)
@@ -181,7 +184,7 @@ async def handle_mention(tw):
     cid=tw.conversation_id or tw.id
     if redis_client.hget(get_thread_key(cid),"count") is None:
         root=x_client.get_tweet(cid,tweet_fields=['text']).data.text;update_thread(cid,f"ROOT:{root}","")
-    hist=get_thread_history(cid);txt=tw.text.replace("@askdegen",""").strip()
+    hist=get_thread_history(cid);txt = tw.text.replace("@askdegen", "").strip()
     if re.search(r"\braid\b",txt,re.IGNORECASE):await post_raid(tw);return
     tok=next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)),None)
     if tok:

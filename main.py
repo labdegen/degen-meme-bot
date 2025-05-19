@@ -206,12 +206,12 @@ def lookup_address(query):
 async def post_raid(tweet):
     prompt = (
         f"Write a one-liner bullpost for $DEGEN based on:\n'{tweet.text}'\n"
-        f"Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. End with NFA."
+        f"At the end Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. End with NFA."
     )
     msg = ask_with_system(DEGEN_SYSTEM, prompt, prefer_grok=False)
     img = choice(glob.glob("raid_images/*.jpg"))
     await safe_tweet(
-        text=truncate_to_sentence(msg, 240),
+        text=truncate_to_sentence(msg, 450),
         in_reply_to_tweet_id=tweet.id,
         media_ids=[x_api.media_upload(img).media_id_string]
     )
@@ -252,7 +252,7 @@ async def handle_mention(tw):
     prompt = (
         f"Metrics: {json.dumps(data)}\n"
         f"User said: {text}\n"
-        "Reply in 2–3 concise sentences max. On-topic and useful. "
+        "Reply in 2-3 concise sentences max. On-topic and useful. "
         "If this is about $DEGEN, be positive and persuasive to buy $DEGEN."
     )
     raw = ask_with_system(GENERAL_SYSTEM, prompt, prefer_grok=True)

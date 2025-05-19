@@ -201,6 +201,8 @@ async def post_raid(tweet):
     )
     db.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
 
+# … [keep everything above unchanged] …
+
 async def handle_mention(tw):
     text = tw.text.replace("@askdegen","").strip()
 
@@ -230,15 +232,17 @@ async def handle_mention(tw):
         await safe_tweet(text=format_metrics(data), in_reply_to_tweet_id=tw.id)
         return
 
-    # 5) any other question → natural ack + DEGEN hype + meme
+    # 5) any other question → natural answer + DEGEN bullpost + meme
     prompt = (
-        f"First, respond naturally and concisely to the question: \"{text}\" "
-        f"Then, in a second sentence, bullpost the Solana $DEGEN token at contract {DEGEN_ADDR} "
-        "and be promotional. End with NFA."
+        f"First, answer the question \"{text}\" in one concise sentence. "
+        f"Then, in a second sentence, say something like \"Either way, it's a great time to stack more $DEGEN.\" "
+        "End with NFA."
     )
     msg = ask_grok(prompt)
+
     img = choice(glob.glob("raid_images/*.jpg"))
     media_id = x_api.media_upload(img).media_id_string
+
     await safe_tweet(
         text=truncate_to_sentence(msg, 240),
         in_reply_to_tweet_id=tw.id,

@@ -60,7 +60,6 @@ x_api = tweepy.API(oauth)
 
 REDIS_PREFIX = "degen:"
 DEGEN_ADDR   = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
-ADDR_RE      = re.compile(r'^[A-Za-z0-9]{43,44}$')
 GROK_URL     = "https://api.x.ai/v1/chat/completions"
 PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
 DEXS_URL     = "https://api.dexscreener.com/token-pairs/v1/solana/"
@@ -151,10 +150,7 @@ async def safe_tweet(text: str, **kwargs):
     return resp
 
 def ask_perplexity(prompt):
-    headers = {
-        "Authorization": f"Bearer {PERPLEXITY_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {PERPLEXITY_KEY}", "Content-Type": "application/json"}
     body = {
         "model": "sonar-pro",
         "messages": [
@@ -164,8 +160,9 @@ def ask_perplexity(prompt):
                     "You are a crypto analyst: concise, sharp, professional, and a bit edgy. "
                     "Always answer ONLY about the $DEGEN token at contract address "
                     "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f on Solana. "
-                    "Do NOT mention or describe any other token or chain. "
-                    "If unsure, simply state: 'I only cover $DEGEN at that address.'"
+                    "Use ONLY the metrics provided in the user prompt. "
+                    "Do NOT invent any data (like supply or max cap). "
+                    "If asked for data not provided, respond: 'No data available.'"
                 )
             },
             {"role": "user", "content": prompt}
@@ -193,8 +190,9 @@ def ask_grok(prompt):
                     "You are a crypto analyst: concise, sharp, professional, and a bit edgy. "
                     "Always answer ONLY about the $DEGEN token at contract address "
                     "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f on Solana. "
-                    "Do NOT mention or describe any other token or chain. "
-                    "If unsure, simply state: 'I only cover $DEGEN at that address.'"
+                    "Use ONLY the metrics provided in the user prompt. "
+                    "Do NOT invent any data (like supply or max cap). "
+                    "If asked for data not provided, respond: 'No data available.'"
                 )
             },
             {"role": "user", "content": prompt}
@@ -220,17 +218,17 @@ def fetch_data(addr=DEGEN_ADDR):
         r = requests.get(f"{DEXS_URL}{addr}", timeout=10)
         r.raise_for_status()
         data = r.json()
-        if isinstance(data, list) and len(data) > 0:
+        if isinstance(data, list) and data:
             data = data[0]
         base = data.get('baseToken', {})
         return {
-            'symbol': base.get('symbol', 'DEGEN'),
+            'symbol':    base.get('symbol', 'DEGEN'),
             'price_usd': float(data.get('priceUsd', 0)),
             'volume_usd': float(data.get('volume', {}).get('h24', 0)),
             'market_cap': float(data.get('marketCap', 0)),
             'change_1h': float(data.get('priceChange', {}).get('h1', 0)),
             'change_24h': float(data.get('priceChange', {}).get('h24', 0)),
-            'link': f"https://dexscreener.com/solana/{addr}"
+            'link':      f"https://dexscreener.com/solana/{addr}"
         }
     except Exception as e:
         logger.error(f"Fetch error: {e}")
@@ -238,55 +236,52 @@ def fetch_data(addr=DEGEN_ADDR):
 
 def format_metrics(d):
     return (
-        f"🚀 {d.get('symbol', 'DEGEN')} | ${d.get('price_usd', 0):,.6f}\n"
-        f"MC ${d.get('market_cap', 0):,.0f} | Vol24 ${d.get('volume_usd', 0):,.0f}\n"
-        f"1h {'🟢' if d.get('change_1h', 0) >= 0 else '🔴'}{d.get('change_1h', 0):+.2f}% | "
-        f"24h {'🟢' if d.get('change_24h', 0) >= 0 else '🔴'}{d.get('change_24h', 0):+.2f}%\n"
-        f"{d.get('link', '')}"
+        f"🚀 {d['symbol']} | ${d['price_usd']:,.6f}\n"
+        f"MC ${d['market_cap']:,.0f} | Vol24 ${d['volume_usd']:,.0f}\n"
+        f"1h {'🟢' if d['change_1h']>=0 else '🔴'}{d['change_1h']:+.2f}% | "
+        f"24h {'🟢' if d['change_24h']>=0 else '🔴'}{d['change_24h']:+.2f}%\n"
+        f"{d['link']}"
     )
 
-async def post_raid(tweet):
-    text_low = tweet.text.lower()
-    if '@askdegen' in text_low and 'raid' in text_low:
-        prompt = (
-            "Write a short one-liner hype for $DEGEN on Solana based on this: "
-            f"'{tweet.text}'. Mention @ogdegenonsol but don't say 'raid'."
-        )
-        msg = ask_perplexity(prompt)
-        img_list = glob.glob("raid_images/*.jpg")
-        media = x_api.media_upload(choice(img_list)) if img_list else None
-        await safe_tweet(
-            text=truncate_to_sentence(msg, 240),
-            in_reply_to_tweet_id=tweet.id,
-            media_ids=[media.media_id_string] if media else None
-        )
-        db.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
-        logger.info("Raid reply sent")
-
 async def handle_mention(tw):
-    convo_id     = getattr(tw, 'conversation_id', None) or tw.id
-    convo_count  = get_convo_count(convo_id)
-    if convo_count >= 2:
+    convo_id    = getattr(tw, 'conversation_id', None) or tw.id
+    if get_convo_count(convo_id) >= 2:
         return
 
     history = get_thread_history(convo_id)
     recent  = get_recent_replies(5)
-    recent_str = "\n".join([f"User: {r['user']}\nBot: {r['bot']}" for r in recent])
+    recent_str = "\n".join(f"User: {r['user']}\nBot: {r['bot']}" for r in recent)
 
-    prompt = (
-        f"Here are some of your most recent crypto takes:\n{recent_str}\n"
-        f"{history}\nUser: {tw.text}\nBot:\n"
-        "Please respond in a complete, professional sentence or two, "
-        "and keep the total reply under 240 characters."
-    )
-    raw_reply = ask_perplexity(prompt)
-    reply     = truncate_to_sentence(raw_reply, 240)
-
-    await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
-    update_thread_history(convo_id, tw.text, reply)
-    increment_convo_count(convo_id)
-    save_recent_reply(tw.text, reply)
-    db.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+    txt = tw.text.replace('@askdegen', '').strip()
+    if "$DEGEN" in txt.upper() or "DEGEN" in txt.upper():
+        data = fetch_data(DEGEN_ADDR)
+        prompt = (
+            f"Metrics: {json.dumps(data)}\n"
+            f"User asked: {txt}\n"
+            "Using ONLY these metrics, respond in a complete, professional sentence or two, "
+            "under 240 characters. Do NOT invent supply or max cap figures."
+        )
+        raw = ask_grok(prompt)
+        reply = truncate_to_sentence(raw, 240)
+        await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
+        save_recent_reply(tw.text, reply)
+        update_thread_history(convo_id, tw.text, reply)
+        increment_convo_count(convo_id)
+        db.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+    else:
+        # fallback to normal thread-based reply
+        prompt = (
+            f"Recent takes:\n{recent_str}\n{history}\n"
+            f"User: {tw.text}\nBot:\n"
+            "Complete sentence or two under 240 characters."
+        )
+        raw = ask_grok(prompt)
+        reply = truncate_to_sentence(raw, 240)
+        await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
+        save_recent_reply(tw.text, reply)
+        update_thread_history(convo_id, tw.text, reply)
+        increment_convo_count(convo_id)
+        db.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
 
 async def mention_loop():
     while True:
@@ -296,47 +291,17 @@ async def mention_loop():
                 x_client.get_users_mentions,
                 id=BOT_ID,
                 since_id=last_id,
-                tweet_fields=['id', 'text', 'conversation_id'],
+                tweet_fields=['id','text','conversation_id'],
                 expansions=['author_id'],
                 user_fields=['username'],
                 max_results=10
             )
             if res and res.data:
                 for tw in reversed(res.data):
-                    tid = tw.id
-                    if db.sismember(f"{REDIS_PREFIX}replied_ids", str(tid)):
+                    if db.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
                         continue
-                    db.set(f"{REDIS_PREFIX}last_mention_id", tid)
-                    text_low = tw.text.lower()
-
-                    if '@askdegen' in text_low and 'raid' in text_low:
-                        await post_raid(tw)
-                        continue
-
-                    txt = tw.text.replace('@askdegen', '').strip()
-                    if "$DEGEN" in txt.upper() or "DEGEN" in txt.upper():
-                        if "ca" in txt.lower() or "contract" in txt.lower():
-                            msg = f"Contract Address: {DEGEN_ADDR}"
-                        else:
-                            data = fetch_data(DEGEN_ADDR)
-                            msg = ask_perplexity(
-                                f"User asked: {txt}\n"
-                                f"Metrics: {json.dumps(data)}\n"
-                                "Please respond in a complete, professional sentence or two, "
-                                "and keep the total reply under 240 characters."
-                            )
-                        reply = truncate_to_sentence(msg, 240)
-                        await safe_tweet(text=reply, in_reply_to_tweet_id=tid)
-                        db.sadd(f"{REDIS_PREFIX}replied_ids", str(tid))
-                    elif txt.lower() in ('ca', 'contract', 'contract address'):
-                        await safe_tweet(text=f"Contract Address: {DEGEN_ADDR}", in_reply_to_tweet_id=tid)
-                        db.sadd(f"{REDIS_PREFIX}replied_ids", str(tid))
-                    elif txt.upper() == 'DEX':
-                        data = fetch_data(DEGEN_ADDR)
-                        await safe_tweet(text=format_metrics(data), in_reply_to_tweet_id=tid)
-                        db.sadd(f"{REDIS_PREFIX}replied_ids", str(tid))
-                    else:
-                        await handle_mention(tw)
+                    db.set(f"{REDIS_PREFIX}last_mention_id", tw.id)
+                    await handle_mention(tw)
         except Exception as e:
             logger.error(f"Mention loop error: {e}")
         await asyncio.sleep(110)
@@ -346,20 +311,20 @@ async def hourly_post_loop():
         try:
             data    = fetch_data(DEGEN_ADDR)
             metrics = format_metrics(data)
-            prompt  = (
-                "Respond ONLY about $DEGEN token at contract address "
-                "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f on Solana. "
-                "Give a punchy one-sentence update on $DEGEN using these metrics, vary every hour. "
-                "Please keep the total tweet under 560 characters and end on a complete sentence."
+            prompt = (
+                f"Metrics: {json.dumps(data)}\n"
+                "Using ONLY these metrics, write a punchy one-sentence update on $DEGEN "
+                "at contract address 6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f on Solana. "
+                "Do NOT invent supply or max cap. End on a complete sentence."
             )
-            raw     = ask_perplexity(prompt)
-            combined = f"{metrics}\n\n{raw}"
-            tweet   = truncate_to_sentence(combined, 560)
+            raw = ask_grok(prompt)
+            tweet = truncate_to_sentence(raw, 560)
+            final = f"{metrics}\n\n{tweet}"
 
             last = db.get(f"{REDIS_PREFIX}last_hourly_post")
-            if tweet.strip() != last:
-                await safe_tweet(text=tweet)
-                db.set(f"{REDIS_PREFIX}last_hourly_post", tweet.strip())
+            if final.strip() != last:
+                await safe_tweet(text=final)
+                db.set(f"{REDIS_PREFIX}last_hourly_post", final.strip())
                 logger.info("Hourly post success")
             else:
                 logger.info("Skipped duplicate hourly post.")

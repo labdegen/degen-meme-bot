@@ -61,7 +61,7 @@ x_api = tweepy.API(oauth)
 # Constants
 REDIS_PREFIX      = "degen:"
 DEGEN_ADDR        = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
-GROK_URL          = "https://api.x.ai/v1/chat/completions"   # use v1 endpoint
+GROK_URL          = "https://api.x.ai/v1/chat/completions"
 PERPLEXITY_URL    = "https://api.perplexity.ai/chat/completions"
 DEXS_SEARCH_URL   = "https://api.dexscreener.com/api/search?query="
 DEXS_URL          = "https://api.dexscreener.com/token-pairs/v1/solana/"
@@ -88,74 +88,17 @@ def truncate_to_sentence(text: str, max_length: int) -> str:
             return snippet[: idx + 1 ]
     return snippet
 
-def save_recent_reply(user_text, bot_text):
-    entry = json.dumps({"user": user_text, "bot": bot_text})
-    db.lpush(RECENT_REPLIES_KEY, entry)
-    db.ltrim(RECENT_REPLIES_KEY, 0, RECENT_REPLIES_LIMIT - 1)
-
-def get_recent_replies(n=5):
-    items = db.lrange(RECENT_REPLIES_KEY, 0, n-1)
-    return [json.loads(x) for x in items]
-
-def get_thread_key(convo_id):
-    return f"{REDIS_PREFIX}thread:{convo_id}"
-
-def get_convo_count(convo_id):
-    return int(db.hget(get_thread_key(convo_id), "count") or 0)
-
-def increment_convo_count(convo_id):
-    db.hincrby(get_thread_key(convo_id), "count", 1)
-    db.expire(get_thread_key(convo_id), 86400)
-
-def get_thread_history(convo_id):
-    return db.hget(get_thread_key(convo_id), "history") or ""
-
-def update_thread_history(convo_id, user_text, bot_text):
-    history = get_thread_history(convo_id)
-    new_history = (history + f"\nUser: {user_text}\nBot: {bot_text}")[-1000:]
-    db.hset(get_thread_key(convo_id), "history", new_history)
-    db.expire(get_thread_key(convo_id), 86400)
-
-async def safe_mention_lookup(fn, *args, **kwargs):
-    now = time.time()
-    while mentions_timestamps and now - mentions_timestamps[0] > RATE_WINDOW:
-        mentions_timestamps.popleft()
-    if len(mentions_timestamps) >= MENTIONS_LIMIT:
-        await asyncio.sleep(RATE_WINDOW - (now - mentions_timestamps[0]) + 1)
-    try:
-        res = fn(*args, **kwargs)
-    except tweepy.TooManyRequests as e:
-        reset = int(e.response.headers.get('x-rate-limit-reset', time.time() + RATE_WINDOW))
-        await asyncio.sleep(max(0, reset - time.time()) + 1)
-        return await safe_mention_lookup(fn, *args, **kwargs)
-    mentions_timestamps.append(time.time())
-    return res
-
-async def safe_tweet(text: str, **kwargs):
-    now = time.time()
-    while tweet_timestamps and now - tweet_timestamps[0] > RATE_WINDOW:
-        tweet_timestamps.popleft()
-    if len(tweet_timestamps) >= TWEETS_LIMIT:
-        await asyncio.sleep(RATE_WINDOW - (now - tweet_timestamps[0]) + 1)
-    try:
-        resp = x_client.create_tweet(text=text, **kwargs)
-    except tweepy.TooManyRequests as e:
-        reset = int(e.response.headers.get('x-rate-limit-reset', time.time() + RATE_WINDOW))
-        await asyncio.sleep(max(0, reset - time.time()) + 1)
-        return await safe_tweet(text=text, **kwargs)
-    tweet_timestamps.append(time.time())
-    return resp
-
+# System prompts
 DEGEN_SYSTEM = (
     "You are a crypto analyst: concise, sharp, professional, genius-level. "
     "Always answer ONLY about the $DEGEN token at contract address "
     f"{DEGEN_ADDR} on Solana. Do NOT mention any other token or chain. "
-    "If asked about metrics, use ONLY the data provided."
+    "If asked about metrics, use ONLY the data provided, and be positive/promotional."
 )
 GENERAL_SYSTEM = (
-    "You are the Stephen Hawking of crypto analysis: genius-level, smart, professional. "
-    "Provide on-topic, insightful answers. When asked about a specific token or contract, "
-    "include the latest DEX metrics for it."
+    "You are a top-tier crypto analyst: concise, smart, on-topic. "
+    "Provide answers in 2–3 sentences max, leaving something to the imagination. "
+    "If asked about $DEGEN, always be positive and persuasive to buy $DEGEN."
 )
 
 def ask_with_system(system_prompt, prompt, prefer_grok=False):
@@ -182,6 +125,38 @@ def ask_with_system(system_prompt, prompt, prefer_grok=False):
             return ask_with_system(system_prompt, prompt, prefer_grok=True)
         return "Unable to provide an update at this time."
 
+# Rate-guarded Twitter
+async def safe_mention_lookup(fn, *args, **kwargs):
+    now = time.time()
+    while mentions_timestamps and now - mentions_timestamps[0] > RATE_WINDOW:
+        mentions_timestamps.popleft()
+    if len(mentions_timestamps) >= MENTIONS_LIMIT:
+        await asyncio.sleep(RATE_WINDOW - (now - mentions_timestamps[0]) + 1)
+    try:
+        return fn(*args, **kwargs)
+    except tweepy.TooManyRequests as e:
+        reset = int(e.response.headers.get('x-rate-limit-reset', time.time() + RATE_WINDOW))
+        await asyncio.sleep(max(0, reset - time.time()) + 1)
+        return await safe_mention_lookup(fn, *args, **kwargs)
+    finally:
+        mentions_timestamps.append(time.time())
+
+async def safe_tweet(text: str, **kwargs):
+    now = time.time()
+    while tweet_timestamps and now - tweet_timestamps[0] > RATE_WINDOW:
+        tweet_timestamps.popleft()
+    if len(tweet_timestamps) >= TWEETS_LIMIT:
+        await asyncio.sleep(RATE_WINDOW - (now - tweet_timestamps[0]) + 1)
+    try:
+        return x_client.create_tweet(text=text, **kwargs)
+    except tweepy.TooManyRequests as e:
+        reset = int(e.response.headers.get('x-rate-limit-reset', time.time() + RATE_WINDOW))
+        await asyncio.sleep(max(0, reset - time.time()) + 1)
+        return await safe_tweet(text=text, **kwargs)
+    finally:
+        tweet_timestamps.append(time.time())
+
+# DEX data helpers
 def fetch_data(addr):
     try:
         r = requests.get(f"{DEXS_URL}{addr}", timeout=10)
@@ -218,63 +193,73 @@ def lookup_address(query):
     try:
         r = requests.get(DEXS_SEARCH_URL + query, timeout=10)
         r.raise_for_status()
-        results = r.json()
-        for tok in results.get("tokens", []):
+        for tok in r.json().get("tokens", []):
             if tok.get("symbol", "").lower() == query.lower():
                 return tok.get("contractAddress")
-        if results.get("tokens"):
-            return results["tokens"][0].get("contractAddress")
-    except Exception:
+        if r.json().get("tokens"):
+            return r.json()["tokens"][0].get("contractAddress")
+    except:
         pass
     return None
 
+# Raid feature
+async def post_raid(tweet):
+    prompt = (
+        f"Write a one-liner bullpost for $DEGEN based on:\n'{tweet.text}'\n"
+        f"Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. End with NFA."
+    )
+    msg = ask_with_system(DEGEN_SYSTEM, prompt, prefer_grok=False)
+    img = choice(glob.glob("raid_images/*.jpg"))
+    await safe_tweet(
+        text=truncate_to_sentence(msg, 240),
+        in_reply_to_tweet_id=tweet.id,
+        media_ids=[x_api.media_upload(img).media_id_string]
+    )
+    db.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
+    logger.info("Raid reply sent")
+
+# Mention handler
 async def handle_mention(tw):
     text = tw.text.replace("@askdegen", "").strip()
-    # DEGEN-specific
-    if re.search(r"\bDEGEN\b", text, re.IGNORECASE) or re.search(r"\$DEGEN\b", text, re.IGNORECASE):
-        data = fetch_data(DEGEN_ADDR)
-        prompt = (
-            f"Metrics: {json.dumps(data)}\n"
-            f"User asked: {text}\n"
-            "Using ONLY these metrics, respond under 800 characters."
-        )
-        raw = ask_with_system(DEGEN_SYSTEM, prompt, prefer_grok=True)
-        reply = truncate_to_sentence(raw, 800)
-        await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
+
+    # 1) Raid command
+    if re.search(r"\braid\b", text, re.IGNORECASE):
+        await post_raid(tw)
         return
-    # Other token by symbol or address
-    addr_match = ADDR_RE.search(text)
-    sym_match  = SYMBOL_RE.search(text)
-    if addr_match or sym_match:
-        addr = addr_match.group(0) if addr_match else lookup_address(sym_match.group(1))
+
+    # 2) $TOKEN or address → show DEX data only
+    token = next((w for w in text.split() if w.startswith('$') or ADDR_RE.match(w)), None)
+    if token:
+        addr = lookup_address(token.lstrip('$')) if token.startswith('$') else token
         if addr:
             data = fetch_data(addr)
             await safe_tweet(text=format_metrics(data), in_reply_to_tweet_id=tw.id)
             return
-    # General query
+
+    # 3) Contract address query
+    if text.upper() == 'CA':
+        await safe_tweet(text=f"Contract Address: {DEGEN_ADDR}", in_reply_to_tweet_id=tw.id)
+        return
+
+    # 4) DEX metrics for DEGEN
+    if text.upper() == 'DEX':
+        data = fetch_data(DEGEN_ADDR)
+        await safe_tweet(text=format_metrics(data), in_reply_to_tweet_id=tw.id)
+        return
+
+    # 5) Conversational / general
+    data = fetch_data(DEGEN_ADDR)
     prompt = (
-        f"User: {text}\n"
-        "As the Stephen Hawking of crypto analysis, provide an insightful, on-topic answer."
+        f"Metrics: {json.dumps(data)}\n"
+        f"User said: {text}\n"
+        "Reply in 2–3 concise sentences max. On-topic and useful. "
+        "If this is about $DEGEN, be positive and persuasive to buy $DEGEN."
     )
-    raw = ask_with_system(GENERAL_SYSTEM, prompt)
-    reply = truncate_to_sentence(raw, 240)
+    raw = ask_with_system(GENERAL_SYSTEM, prompt, prefer_grok=True)
+    reply = truncate_to_sentence(raw, 800)
     await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
 
-async def post_raid(tweet):
-    text_low = tweet.text.lower()
-    if '@askdegen' in text_low and 'raid' in text_low:
-        prompt = f"Write a short one-liner hype for $DEGEN based on this: '{tweet.text}'. Mention @ogdegenonsol but don't say 'raid'. End with NFA."
-        msg = ask_perplexity(prompt)
-        img_list = glob.glob("raid_images/*.jpg")
-        media = x_api.media_upload(choice(img_list)) if img_list else None
-        await safe_tweet(
-            text=msg[:240],
-            in_reply_to_tweet_id=tweet.id,
-            media_ids=[media.media_id_string] if media else None
-        )
-        db.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
-        logger.info("Raid reply sent")
-
+# Loops
 async def mention_loop():
     while True:
         try:
@@ -294,7 +279,6 @@ async def mention_loop():
                         continue
                     db.set(f"{REDIS_PREFIX}last_mention_id", tw.id)
                     await handle_mention(tw)
-                    db.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
         except Exception as e:
             logger.error(f"Mention loop error: {e}")
         await asyncio.sleep(110)
@@ -304,12 +288,11 @@ async def hourly_post_loop():
         try:
             data    = fetch_data(DEGEN_ADDR)
             metrics = format_metrics(data)
-            prompt = (
+            prompt  = (
                 f"Metrics: {json.dumps(data)}\n"
-                "Write a punchy one-sentence update on $DEGEN at the contract above. Do not mention the contract address in reply.  You are a holder of the $DEGEN coin.  Be confident and positive.  You are promoting the token.  Make people excited about it and want to buy it."
-                "End on a complete sentence."
+                "Write a punchy one-sentence update on $DEGEN. Be positive and promotional."
             )
-            raw   = ask_with_system(DEGEN_SYSTEM, prompt, prefer_grok=True)
+            raw = ask_with_system(DEGEN_SYSTEM, prompt, prefer_grok=True)
             tweet = truncate_to_sentence(f"{metrics}\n\n{raw}", 560)
 
             last = db.get(f"{REDIS_PREFIX}last_hourly_post")

@@ -216,7 +216,7 @@ def fetch_data(addr=DEGEN_ADDR):
         return {
             'symbol': base.get('symbol', 'DEGEN'),
             'price_usd': float(data.get('priceUsd', 0)),
-            'volume_usd': float(data.get('volume', {}).get('h1', 0)),  # last hour volume
+            'volume_usd': float(data.get('volume', {}).get('h1', 0)),
             'market_cap': float(data.get('marketCap', 0)),
             'change_1h': float(data.get('priceChange', {}).get('h1', 0)),
             'change_24h': float(data.get('priceChange', {}).get('h24', 0)),
@@ -228,33 +228,19 @@ def fetch_data(addr=DEGEN_ADDR):
 
 def format_metrics(d):
     return (
-        f"🚀 {d.get('symbol')} | ${d.get('price_usd'):, .6f}\n"
-        f"Vol1h ${d.get('volume_usd'):, .0f} | MC ${d.get('market_cap'):, .0f}\n"
+        f"🚀 {d.get('symbol')} | ${d.get('price_usd'):,.6f}\n"
+        f"Vol1h ${d.get('volume_usd'):,.0f} | MC ${d.get('market_cap'):,.0f}\n"
         f"1h {'🟢' if d.get('change_1h') >= 0 else '🔴'}{d.get('change_1h'):+.2f}% "
         f"24h {'🟢' if d.get('change_24h') >= 0 else '🔴'}{d.get('change_24h'):+.2f}%\n"
         f"{d.get('link')}"
     )
 
-# —————————————— Interaction Handlers ——————————————
-async def post_raid(tweet):
-    # ... unchanged raid logic ...
-    pass
-
-async def handle_mention(tw):
-    # ... unchanged mention logic ...
-    pass
-
 # —————————————— Main Loops ——————————————
-async def mention_loop():
-    # ... unchanged mention loop ...
-    pass
-
 async def hourly_post_loop():
     while True:
         try:
             data = fetch_data(DEGEN_ADDR)
             metrics = format_metrics(data)
-            # Craft a bulletproof prompt focused on Solana DEX data for the correct contract
             prompt = (
                 f"Using only the following Solana DEX metrics for $DEGEN (contract {DEGEN_ADDR}) over the last hour: "
                 f"{json.dumps(data)}, write a positive, punchy one-sentence update that highlights the token's performance on the DEX in the past hour. "
@@ -262,7 +248,6 @@ async def hourly_post_loop():
             )
             tweet = ask_perplexity(prompt)
             final = f"{metrics}\n\n{tweet}"
-
             last = db.get(f"{REDIS_PREFIX}last_hourly_post")
             if final.strip() != last:
                 await safe_tweet(text=final[:560])

@@ -98,7 +98,7 @@ DEGEN_SYSTEM = (
 GENERAL_SYSTEM = (
     "You are a general-knowledge expert: concise, smart, and helpful. "
     "Answer any question in 2–3 sentences, on any topic. "
-    "If the question mentions $DEGEN or that contract address, still follow the DEGEN rules."
+   
 )
 
 def ask_with_system(system_prompt, prompt, prefer_grok=False):
@@ -253,7 +253,7 @@ async def handle_mention(tw):
         f"Metrics: {json.dumps(data)}\n"
         f"User said: {text}\n"
         "Reply in 2-3 concise sentences max. On-topic and useful. "
-        "If this is about $DEGEN, be positive and persuasive to buy $DEGEN."
+       
     )
     raw = ask_with_system(GENERAL_SYSTEM, prompt, prefer_grok=True)
     reply = truncate_to_sentence(raw, 800)

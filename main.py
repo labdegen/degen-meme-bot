@@ -101,9 +101,9 @@ def update_thread(convo_id, user_text, bot_text):
     db.hset(get_thread_key(convo_id), "history", new)
     db.expire(get_thread_key(convo_id), 86400)
 
-# Grok-only prompt
+# Grok-only prompt in voice of degenerate gambler
 SYSTEM_PROMPT = (
-    "You are a crypto analyst: concise, sharp, professional, genius-level. "
+    "You are a degenerate gambler crypto analyst: edgy, informal, risk-taking. "
     f"Always speak about the $DEGEN token at contract address {DEGEN_ADDR}. "
     "Do NOT mention any other token or chain."
 )
@@ -120,7 +120,7 @@ def ask_grok(prompt: str) -> str:
     }
     headers = {"Authorization": f"Bearer {GROK_KEY}", "Content-Type": "application/json"}
     try:
-        r = requests.post(GROK_URL, json=body, headers=headers, timeout=65)
+        r = requests.post(GROK_URL, json=body, headers=headers, timeout=60)
         r.raise_for_status()
         return r.json()['choices'][0]['message']['content'].strip()
     except Exception as e:
@@ -186,8 +186,7 @@ def format_metrics(d: dict) -> str:
     )
 
 def lookup_address(q: str) -> str:
-    ql = q.lower()
-    if ql == 'degen':
+    if q.lower() == 'degen':
         return DEGEN_ADDR
     if ADDR_RE.fullmatch(q):
         return q
@@ -195,7 +194,7 @@ def lookup_address(q: str) -> str:
         r = requests.get(DEXS_SEARCH_URL + q, timeout=10)
         r.raise_for_status()
         for tok in r.json().get("tokens", []):
-            if tok.get("symbol","").lower() == ql:
+            if tok.get("symbol","").lower() == q.lower():
                 return tok.get("contractAddress")
         if r.json().get("tokens"):
             return r.json()["tokens"][0].get("contractAddress")
@@ -221,10 +220,10 @@ async def post_raid(tweet):
 async def handle_mention(tw):
     convo_id = tw.conversation_id or tw.id
 
-    # fetch & record root on first reply
+    # record root on first reply
     if db.hget(get_thread_key(convo_id), "count") is None:
-        root = x_client.get_tweet(convo_id, tweet_fields=['text']).data.text
-        update_thread(convo_id, f"ROOT: {root}", "")
+        root_text = x_client.get_tweet(convo_id, tweet_fields=['text']).data.text
+        update_thread(convo_id, f"ROOT: {root_text}", "")
     history = get_thread_history(convo_id)
 
     text = tw.text.replace("@askdegen","").strip()
@@ -255,17 +254,18 @@ async def handle_mention(tw):
         await safe_tweet(text=format_metrics(data), in_reply_to_tweet_id=tw.id)
         return
 
-    # 5) general: include thread context
+    # 5) general: thread context + natural answer + DEGEN bullpost + CA
     prompt = (
-        f"Conversation so far:{history}\nUser asked: \"{text}\"\n"
-        "First, respond naturally and concisely to that. "
-        "Then, add a promotional line about stacking more $DEGEN. End with NFA."
+        f"History:{history}\nUser asked: \"{text}\"\n"
+        "First, respond naturally and concisely to that question. "
+        "Then, in a second sentence, say something like \"Kind of like stacking $DEGEN.\" "
+        "End with NFA."
     )
     raw = ask_grok(prompt)
-    reply = truncate_to_sentence(raw, 240) + f"\nContract Address: {DEGEN_ADDR}"
+    reply_body = truncate_to_sentence(raw, 240)
+    reply = f"{reply_body} Contract Address: {DEGEN_ADDR}"
 
     await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
-
     update_thread(convo_id, text, reply)
     increment_thread(convo_id)
 

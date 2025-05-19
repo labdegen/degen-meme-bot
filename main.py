@@ -75,7 +75,8 @@ TWEETS_LIMIT = 50
 mentions_timestamps = deque()
 tweet_timestamps = deque()
 
-# Helper: truncate without cutting mid-sentence
+# Helpers
+
 def truncate_to_sentence(text: str, max_length: int) -> str:
     if len(text) <= max_length:
         return text
@@ -104,25 +105,24 @@ def update_thread(cid, user_text, bot_text):
     redis_client.hset(get_thread_key(cid), "history", new_hist)
     redis_client.expire(get_thread_key(cid), 86400)
 
-# Grok system prompt
+# Grok prompt
+SYSTEM_PROMPT = (
+    "You are a degenerate gambler crypto analyst: edgy, informal, risk-taking. "
+    f"Always speak about the $DEGEN token at contract address {DEGEN_ADDR}. "
+    "Do NOT mention any other token or chain."
+)
+
 def ask_grok(prompt: str) -> str:
     payload = {
         "model": "grok-3-latest",
         "messages": [
-            {"role": "system", "content": (
-                "You are a degenerate gambler crypto analyst: edgy, informal, risk-taking. "
-                f"Always speak about the $DEGEN token at contract address {DEGEN_ADDR}. "
-                "Do NOT mention any other token or chain."
-            )},
+            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}
         ],
         "max_tokens": 180,
         "temperature": 0.8
     }
-    headers = {
-        "Authorization": f"Bearer {os.getenv('GROK_API_KEY')}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {os.getenv('GROK_API_KEY')}", "Content-Type": "application/json"}
     try:
         r = requests.post(GROK_URL, json=payload, headers=headers, timeout=60)
         r.raise_for_status()
@@ -163,7 +163,7 @@ async def safe_tweet(text: str, media_id=None, **kwargs):
     finally:
         tweet_timestamps.append(time.time())
 
-# DEX data helpers
+# DEX helpers
 def fetch_data(addr: str) -> dict:
     try:
         r = requests.get(f"{DEXS_URL}{addr}", timeout=10)
@@ -212,13 +212,14 @@ def build_dex_reply(addr: str) -> str:
     return format_metrics(data) + data['link']
 
 async def post_raid(tweet):
-    # Include thread history in raid prompt
+    """
+    Include thread history in raid prompt and post a bullpost with a random meme.
+    """
     convo_id = tweet.conversation_id or tweet.id
     history = get_thread_history(convo_id)
     prompt = (
-        f"History:{history}
-User: '{tweet.text}'
-"
+        f"History:{history}\n"
+        f"User: '{tweet.text}'\n"
         "Write a one-liner bullpost for $DEGEN based on the above. "
         f"Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. End with NFA."
     )
@@ -226,11 +227,11 @@ User: '{tweet.text}'
     img = choice(glob.glob("raid_images/*.jpg"))
     media_id = x_api.media_upload(img).media_id_string
     await safe_tweet(
-        text=truncate_to_sentence(msg,240),
+        text=truncate_to_sentence(msg, 240),
         media_id=media_id,
         in_reply_to_tweet_id=tweet.id
     )
-    redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
+    redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
 
 async def handle_mention(tw):
     convo_id = tw.conversation_id or tw.id
@@ -239,35 +240,37 @@ async def handle_mention(tw):
         update_thread(convo_id, f"ROOT: {root}", "")
     history = get_thread_history(convo_id)
     txt = tw.text.replace("@askdegen", "").strip()
+
     # 1) raid
     if re.search(r"\braid\b", txt, re.IGNORECASE):
         await post_raid(tw)
         return
+
     # 2) token/address -> DEX preview
     token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
     if token:
         sym = token.lstrip('$').upper()
-        addr = DEGEN_ADDR if sym == "DEGEN" else lookup_address(token)
+        addr = DEGEN_ADDR if sym=="DEGEN" else lookup_address(token)
         if addr:
             await safe_tweet(build_dex_reply(addr), in_reply_to_tweet_id=tw.id)
             return
-    # 3) CA/DEX
-    if txt.upper() in ("CA","DEX"):
+
+    # 3) CA/DEX commands
+    if txt.upper() in ("CA", "DEX"):
         await safe_tweet(build_dex_reply(DEGEN_ADDR), in_reply_to_tweet_id=tw.id)
         return
-        # 4) general fallback
+
+    # 4) general fallback
     prompt = (
-        f"History:{history}
-User asked: \"{txt}\"
-"
+        f"History:{history}\n"
+        f"User asked: \"{txt}\"\n"
         "First, answer naturally and concisely. "
         "Then, in a second gambler-style line, segue with a fresh tagline about stacking $DEGEN. End with NFA."
     )
     raw = ask_grok(prompt)
-    # Add natural segue before contract address
-    reply_body = truncate_to_sentence(raw,200)
-    segue = "No matter what a good time to stack $DEGEN."
-    reply = f"{reply_body} {segue} CA: {DEGEN_ADDR}"
+    reply_body = truncate_to_sentence(raw, 200)
+    segue = "Good time to stack $DEGEN."
+    reply = f"{reply_body} {segue} Contract Address: {DEGEN_ADDR}"
     img = choice(glob.glob("raid_images/*.jpg"))
     media_id = x_api.media_upload(img).media_id_string
     await safe_tweet(
@@ -282,13 +285,20 @@ async def mention_loop():
     while True:
         try:
             last = redis_client.get(f"{REDIS_PREFIX}last_mention_id")
-            params = {"id":BOT_ID,"tweet_fields":["id","text","conversation_id"],
-                      "expansions":["author_id"],"user_fields":["username"],"max_results":10}
-            if last: params["since_id"] = int(last)
+            params = {
+                "id": BOT_ID,
+                "tweet_fields": ["id", "text", "conversation_id"],
+                "expansions": ["author_id"],
+                "user_fields": ["username"],
+                "max_results": 10
+            }
+            if last:
+                params["since_id"] = int(last)
             res = await safe_mention_lookup(x_client.get_users_mentions, **params)
             if res and res.data:
                 for tw in reversed(res.data):
-                    if redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)): continue
+                    if redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
+                        continue
                     redis_client.set(f"{REDIS_PREFIX}last_mention_id", tw.id)
                     await handle_mention(tw)
         except Exception as e:

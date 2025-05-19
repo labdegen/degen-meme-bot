@@ -3,7 +3,6 @@ import requests
 import os
 from dotenv import load_dotenv
 import logging
-import re
 import redis
 import json
 import asyncio
@@ -74,14 +73,18 @@ def fetch_data(addr):
         r = requests.get(url, timeout=10)
         r.raise_for_status()
         data = r.json()
-        pair = data['pairs'][0]
+        logger.info(f"fetch_data raw: {data}")  # For debugging, can remove after confirming structure
+        pairs = data.get('pairs')
+        if not pairs or not isinstance(pairs, list) or len(pairs) == 0:
+            raise ValueError("No pairs found in data")
+        pair = pairs[0]
         return {
-            'price_usd': float(pair['priceUsd']),
+            'price_usd': float(pair.get('priceUsd', 0)),
             'market_cap': float(pair.get('fdv', 0)),
-            'volume_usd': float(pair['volume']['h24']),
-            'change_1h': float(pair['priceChange']['h1']),
-            'change_24h': float(pair['priceChange']['h24']),
-            'liquidity_usd': float(pair['liquidity']['usd'])
+            'volume_usd': float(pair.get('volume', {}).get('h24', 0)),
+            'change_1h': float(pair.get('priceChange', {}).get('h1', 0)),
+            'change_24h': float(pair.get('priceChange', {}).get('h24', 0)),
+            'liquidity_usd': float(pair.get('liquidity', {}).get('usd', 0))
         }
     except Exception as e:
         logger.warning(f"fetch_data error: {e}")
@@ -112,21 +115,19 @@ def identify_chart_pattern(data):
     else:
         return "Consolidation Phase"
 
-# --- Perplexity AI ---
+# --- Perplexity AI (SONAR PRO) ---
 def ask_perplexity(prompt):
     headers = {"Authorization": f"Bearer {PERPLEXITY_KEY}", "Content-Type": "application/json"}
     body = {
-        "model": "sonar-medium-chat",
+        "model": "sonar-pro-chat",
         "messages": [
             {
                 "role": "system",
-                "content": """You're a crypto analyst with deep technical insight and market savvy. Respond with:
-- Chain analysis (volume, liquidity pools)
-- Sentiment interpretation (social, whale activity)
-- Technical patterns (chart formations, indicators)
-- Concise, professional, a little edgy (no emojis)
-- Never mention a knowledge base or context explicitly.
-"""
+                "content": (
+                    "You're a crypto analyst with deep technical insight and market savvy. "
+                    "Respond with: chain analysis, sentiment, technical patterns, and keep it concise, professional, and a little edgy. "
+                    "Never mention a knowledge base or context explicitly."
+                )
             },
             {"role": "user", "content": prompt}
         ],
@@ -138,7 +139,9 @@ def ask_perplexity(prompt):
     try:
         r = requests.post("https://api.perplexity.ai/chat/completions", json=body, headers=headers, timeout=25)
         r.raise_for_status()
-        return r.json()['choices'][0]['message']['content'].strip()
+        data = r.json()
+        # Defensive: Perplexity sometimes returns choices as a list of dicts with 'message'
+        return data['choices'][0]['message']['content'].strip()
     except Exception as e:
         logger.warning(f"Perplexity error: {e}")
         return "Analyzing market patterns... Check back soon. [Degen Out]"

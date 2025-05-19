@@ -101,7 +101,7 @@ def update_thread(convo_id, user_text, bot_text):
     db.hset(get_thread_key(convo_id), "history", new)
     db.expire(get_thread_key(convo_id), 86400)
 
-# Grok-only prompt in voice of degenerate gambler
+# Grok-only prompt in voice of a degenerate gambler
 SYSTEM_PROMPT = (
     "You are a degenerate gambler crypto analyst: edgy, informal, risk-taking. "
     f"Always speak about the $DEGEN token at contract address {DEGEN_ADDR}. "
@@ -142,18 +142,20 @@ async def safe_mention_lookup(fn, *args, **kwargs):
     finally:
         mentions_timestamps.append(time.time())
 
-async def safe_tweet(text: str, **kwargs):
+async def safe_tweet(text: str, media_id=None, **kwargs):
     now = time.time()
     while tweet_timestamps and now - tweet_timestamps[0] > RATE_WINDOW:
         tweet_timestamps.popleft()
     if len(tweet_timestamps) >= TWEETS_LIMIT:
         await asyncio.sleep(RATE_WINDOW - (now - tweet_timestamps[0]) + 1)
     try:
+        if media_id:
+            return x_client.create_tweet(text=text, media_ids=[media_id], **kwargs)
         return x_client.create_tweet(text=text, **kwargs)
     except tweepy.TooManyRequests as e:
         reset = int(e.response.headers.get('x-rate-limit-reset', time.time()+RATE_WINDOW))
         await asyncio.sleep(max(0, reset - time.time())+1)
-        return await safe_tweet(text=text, **kwargs)
+        return await safe_tweet(text=text, media_id=media_id, **kwargs)
     finally:
         tweet_timestamps.append(time.time())
 
@@ -212,20 +214,19 @@ async def post_raid(tweet):
     media_id = x_api.media_upload(img).media_id_string
     await safe_tweet(
         text=truncate_to_sentence(msg, 240),
-        in_reply_to_tweet_id=tweet.id,
-        media_ids=[media_id]
+        media_id=media_id,
+        in_reply_to_tweet_id=tweet.id
     )
     db.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
 
 async def handle_mention(tw):
     convo_id = tw.conversation_id or tw.id
 
-    # record root on first reply
     if db.hget(get_thread_key(convo_id), "count") is None:
         root_text = x_client.get_tweet(convo_id, tweet_fields=['text']).data.text
         update_thread(convo_id, f"ROOT: {root_text}", "")
-    history = get_thread_history(convo_id)
 
+    history = get_thread_history(convo_id)
     text = tw.text.replace("@askdegen","").strip()
 
     # 1) raid
@@ -233,39 +234,56 @@ async def handle_mention(tw):
         await post_raid(tw)
         return
 
-    # 2) token/address → metrics
+    # 2) token/address → metrics (with meme)
     token = next((w for w in text.split() if w.startswith('$') or ADDR_RE.match(w)), None)
     if token:
         sym = token.lstrip('$').upper()
         addr = DEGEN_ADDR if sym=="DEGEN" else (lookup_address(sym) if token.startswith('$') else token)
         if addr:
             data = fetch_data(addr)
-            await safe_tweet(text=format_metrics(data), in_reply_to_tweet_id=tw.id)
+            img = choice(glob.glob("raid_images/*.jpg"))
+            media_id = x_api.media_upload(img).media_id_string
+            await safe_tweet(text=format_metrics(data),
+                             media_id=media_id,
+                             in_reply_to_tweet_id=tw.id)
             return
 
     # 3) CA
     if text.upper() == "CA":
-        await safe_tweet(text=f"Contract Address: {DEGEN_ADDR}", in_reply_to_tweet_id=tw.id)
+        img = choice(glob.glob("raid_images/*.jpg"))
+        media_id = x_api.media_upload(img).media_id_string
+        await safe_tweet(text=f"Contract Address: {DEGEN_ADDR}",
+                         media_id=media_id,
+                         in_reply_to_tweet_id=tw.id)
         return
 
     # 4) DEX
     if text.upper() == "DEX":
         data = fetch_data(DEGEN_ADDR)
-        await safe_tweet(text=format_metrics(data), in_reply_to_tweet_id=tw.id)
+        img = choice(glob.glob("raid_images/*.jpg"))
+        media_id = x_api.media_upload(img).media_id_string
+        await safe_tweet(text=format_metrics(data),
+                         media_id=media_id,
+                         in_reply_to_tweet_id=tw.id)
         return
 
-    # 5) general: thread context + natural answer + DEGEN bullpost + CA
+    # 5) general: context + natural answer + DEGEN hype + CA + meme
     prompt = (
         f"History:{history}\nUser asked: \"{text}\"\n"
         "First, respond naturally and concisely to that question. "
-        "Then, in a second sentence, say something like \"Kind of like stacking $DEGEN.\" "
-        "End with NFA."
+        "Then, in a second sentence, say \"Kind of like stacking $DEGEN.\" "
+        "Do NOT include the contract address."
     )
     raw = ask_grok(prompt)
     reply_body = truncate_to_sentence(raw, 240)
     reply = f"{reply_body} Contract Address: {DEGEN_ADDR}"
 
-    await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
+    img = choice(glob.glob("raid_images/*.jpg"))
+    media_id = x_api.media_upload(img).media_id_string
+    await safe_tweet(text=reply,
+                     media_id=media_id,
+                     in_reply_to_tweet_id=tw.id)
+
     update_thread(convo_id, text, reply)
     increment_thread(convo_id)
 
@@ -303,7 +321,9 @@ async def hourly_post_loop():
             tweet   = truncate_to_sentence(f"{metrics}\n\n{raw}", 560)
             last    = db.get(f"{REDIS_PREFIX}last_hourly_post")
             if tweet.strip() != last:
-                await safe_tweet(text=tweet)
+                img = choice(glob.glob("raid_images/*.jpg"))
+                media_id = x_api.media_upload(img).media_id_string
+                await safe_tweet(text=tweet, media_id=media_id)
                 db.set(f"{REDIS_PREFIX}last_hourly_post", tweet.strip())
         except Exception as e:
             logger.error(f"Hourly post error: {e}")

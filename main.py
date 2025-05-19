@@ -263,29 +263,328 @@ async def handle_mention(tw):
         await post_raid(tw)
         return
 
-    # 2) Check for DEX or CA commands - Fixed to properly handle these commands
-    if re.search(r"\b(dex|ca|contract|address)\b", txt, re.IGNORECASE):
-        img = choice(glob.glob("raid_images/*.jpg"))
-        media_id = x_api.media_upload(img).media_id_string
+    # 2) Handle specific commands
+    # CA command - return just the contract address
+    if re.match(r"\s*ca\s*$", txt, re.IGNORECASE):
+        await safe_tweet(
+            text=f"$DEGEN Contract Address: {DEGEN_ADDR}",
+            in_reply_to_tweet_id=tw.id
+        )
+        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+        return
+        
+    # DEX command - return DEX data for $DEGEN
+    if re.match(r"\s*dex\s*$", txt, re.IGNORECASE):
         await safe_tweet(
             text=build_dex_reply(DEGEN_ADDR),
-            media_id=media_id,
+            in_reply_to_tweet_id=tw.id
+        )
+        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+        return
+        
+    # Contract Address or other similar terms - return contract address
+    if re.search(r"\b(contract|address)\b", txt, re.IGNORECASE) and not re.search(r"\bdex\b", txt, re.IGNORECASE):
+        await safe_tweet(
+            text=f"$DEGEN Contract Address: {DEGEN_ADDR}",
             in_reply_to_tweet_id=tw.id
         )
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
         return
 
     # 3) token/address -> DEX preview
-    token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
+    token = next((w for w in txt.split() if w.startswith('
+
+    # 4) general fallback
+    prompt = (
+        f"History:{history}\n"
+        f"User asked: \"{txt}\"\n"
+        "First, answer naturally and concisely. "
+        "Then, in a second gambler-style line, mention stacking $DEGEN. End with NFA."
+    )
+    raw = ask_grok(prompt)
+    
+    # Ensure we have a complete response that doesn't get cut off
+    reply_body = raw.strip()
+    
+    # Make sure the response contains $DEGEN mention and contract address
+    if "$DEGEN" not in reply_body:
+        reply = f"{reply_body}\n\nStack $DEGEN! Contract Address: {DEGEN_ADDR}"
+    else:
+        # If $DEGEN is already mentioned, just add the contract address if needed
+        if DEGEN_ADDR not in reply_body:
+            reply = f"{reply_body}\n\nContract Address: {DEGEN_ADDR}"
+        else:
+            reply = reply_body
+    
+    # Ensure we're not exceeding Twitter's character limit
+    if len(reply) > 260:
+        reply = truncate_to_sentence(reply, 220) + f"\n\nContract Address: {DEGEN_ADDR}"
+    
+    img = choice(glob.glob("raid_images/*.jpg"))
+    media_id = x_api.media_upload(img).media_id_string
+    
+    await safe_tweet(
+        text=reply,
+        media_id=media_id,
+        in_reply_to_tweet_id=tw.id
+    )
+    redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+    update_thread(convo_id, txt, reply)
+    increment_thread(convo_id)
+
+async def mention_loop():
+    while True:
+        try:
+            last = redis_client.get(f"{REDIS_PREFIX}last_mention_id")
+            params = {
+                "id": BOT_ID,
+                "tweet_fields": ["id", "text", "conversation_id"],
+                "expansions": ["author_id"],
+                "user_fields": ["username"],
+                "max_results": 10
+            }
+            if last:
+                params["since_id"] = int(last)
+            res = await safe_mention_lookup(x_client.get_users_mentions, **params)
+            if res and res.data:
+                for tw in reversed(res.data):
+                    if redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
+                        continue
+                    redis_client.set(f"{REDIS_PREFIX}last_mention_id", tw.id)
+                    await handle_mention(tw)
+        except Exception as e:
+            logger.error(f"Mention loop error: {e}")
+        await asyncio.sleep(110)
+
+async def search_mentions_loop():
+    """
+    New loop to handle searching for mentions that might not be captured by the mentions API,
+    especially mentions in communities.
+    """
+    # Initialize last_search_id if not present
+    if not redis_client.exists(f"{REDIS_PREFIX}last_search_id"):
+        redis_client.set(f"{REDIS_PREFIX}last_search_id", INITIAL_SEARCH_ID)
+        logger.info(f"Initialized last_search_id to {INITIAL_SEARCH_ID}")
+    
+    while True:
+        try:
+            query = f"@{BOT_USERNAME} -is:retweet"
+            search_params = {
+                "query": query,
+                "tweet_fields": ["id", "text", "conversation_id", "created_at"],
+                "expansions": ["author_id"],
+                "user_fields": ["username"],
+                "max_results": 10
+            }
+            
+            try:
+                # Always try without since_id first to avoid the age restriction error
+                search_results = await safe_search(
+                    x_client.search_recent_tweets,
+                    **search_params
+                )
+                logger.info("Successfully searched for community mentions")
+            except Exception as e:
+                logger.error(f"Search call failed: {e}", exc_info=True)
+                search_results = None
+            
+            if search_results and search_results.data:
+                newest_id = max(int(tw.id) for tw in search_results.data) if search_results.data else 0
+                
+                for tw in search_results.data:
+                    # Skip if we've already processed this tweet
+                    if redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
+                        continue
+                    
+                    # Get the full tweet text from tw
+                    logger.info(f"Processing community mention: {tw.id} - {tw.text[:30]}...")
+                    
+                    # Process the mention
+                    await handle_mention(tw)
+                    redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+                
+                # Update the last search ID
+                if newest_id > 0:
+                    redis_client.set(f"{REDIS_PREFIX}last_search_id", str(newest_id))
+                    logger.info(f"Updated last_search_id to {newest_id}")
+                    
+        except Exception as e:
+            logger.error(f"Search mentions loop error: {e}", exc_info=True)
+        
+        # Wait before next search
+        await asyncio.sleep(180)  # Run every 3 minutes
+
+async def hourly_post_loop():
+    while True:
+        try:
+            data = fetch_data(DEGEN_ADDR)
+            metrics = format_metrics(data)
+            raw = ask_grok("Write a one-sentence bullpost update on $DEGEN. Be promotional.")
+            tweet = truncate_to_sentence(metrics + raw, 560)
+            last = redis_client.get(f"{REDIS_PREFIX}last_hourly_post")
+            if tweet != last:
+                img = choice(glob.glob("raid_images/*.jpg"))
+                media_id = x_api.media_upload(img).media_id_string
+                await safe_tweet(tweet, media_id=media_id)
+                redis_client.set(f"{REDIS_PREFIX}last_hourly_post", tweet)
+        except Exception as e:
+            logger.error(f"Hourly post error: {e}")
+        await asyncio.sleep(3600)
+
+async def main():
+    await asyncio.gather(mention_loop(), search_mentions_loop(), hourly_post_loop())
+
+if __name__ == "__main__":
+    asyncio.run(main())) or ADDR_RE.match(w)), None)
     if token:
-        sym = token.lstrip('$').upper()
+        sym = token.lstrip('
+
+    # 4) general fallback
+    prompt = (
+        f"History:{history}\n"
+        f"User asked: \"{txt}\"\n"
+        "First, answer naturally and concisely. "
+        "Then, in a second gambler-style line, mention stacking $DEGEN. End with NFA."
+    )
+    raw = ask_grok(prompt)
+    
+    # Ensure we have a complete response that doesn't get cut off
+    reply_body = raw.strip()
+    
+    # Make sure the response contains $DEGEN mention and contract address
+    if "$DEGEN" not in reply_body:
+        reply = f"{reply_body}\n\nStack $DEGEN! Contract Address: {DEGEN_ADDR}"
+    else:
+        # If $DEGEN is already mentioned, just add the contract address if needed
+        if DEGEN_ADDR not in reply_body:
+            reply = f"{reply_body}\n\nContract Address: {DEGEN_ADDR}"
+        else:
+            reply = reply_body
+    
+    # Ensure we're not exceeding Twitter's character limit
+    if len(reply) > 260:
+        reply = truncate_to_sentence(reply, 220) + f"\n\nContract Address: {DEGEN_ADDR}"
+    
+    img = choice(glob.glob("raid_images/*.jpg"))
+    media_id = x_api.media_upload(img).media_id_string
+    
+    await safe_tweet(
+        text=reply,
+        media_id=media_id,
+        in_reply_to_tweet_id=tw.id
+    )
+    redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+    update_thread(convo_id, txt, reply)
+    increment_thread(convo_id)
+
+async def mention_loop():
+    while True:
+        try:
+            last = redis_client.get(f"{REDIS_PREFIX}last_mention_id")
+            params = {
+                "id": BOT_ID,
+                "tweet_fields": ["id", "text", "conversation_id"],
+                "expansions": ["author_id"],
+                "user_fields": ["username"],
+                "max_results": 10
+            }
+            if last:
+                params["since_id"] = int(last)
+            res = await safe_mention_lookup(x_client.get_users_mentions, **params)
+            if res and res.data:
+                for tw in reversed(res.data):
+                    if redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
+                        continue
+                    redis_client.set(f"{REDIS_PREFIX}last_mention_id", tw.id)
+                    await handle_mention(tw)
+        except Exception as e:
+            logger.error(f"Mention loop error: {e}")
+        await asyncio.sleep(110)
+
+async def search_mentions_loop():
+    """
+    New loop to handle searching for mentions that might not be captured by the mentions API,
+    especially mentions in communities.
+    """
+    # Initialize last_search_id if not present
+    if not redis_client.exists(f"{REDIS_PREFIX}last_search_id"):
+        redis_client.set(f"{REDIS_PREFIX}last_search_id", INITIAL_SEARCH_ID)
+        logger.info(f"Initialized last_search_id to {INITIAL_SEARCH_ID}")
+    
+    while True:
+        try:
+            query = f"@{BOT_USERNAME} -is:retweet"
+            search_params = {
+                "query": query,
+                "tweet_fields": ["id", "text", "conversation_id", "created_at"],
+                "expansions": ["author_id"],
+                "user_fields": ["username"],
+                "max_results": 10
+            }
+            
+            try:
+                # Always try without since_id first to avoid the age restriction error
+                search_results = await safe_search(
+                    x_client.search_recent_tweets,
+                    **search_params
+                )
+                logger.info("Successfully searched for community mentions")
+            except Exception as e:
+                logger.error(f"Search call failed: {e}", exc_info=True)
+                search_results = None
+            
+            if search_results and search_results.data:
+                newest_id = max(int(tw.id) for tw in search_results.data) if search_results.data else 0
+                
+                for tw in search_results.data:
+                    # Skip if we've already processed this tweet
+                    if redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
+                        continue
+                    
+                    # Get the full tweet text from tw
+                    logger.info(f"Processing community mention: {tw.id} - {tw.text[:30]}...")
+                    
+                    # Process the mention
+                    await handle_mention(tw)
+                    redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+                
+                # Update the last search ID
+                if newest_id > 0:
+                    redis_client.set(f"{REDIS_PREFIX}last_search_id", str(newest_id))
+                    logger.info(f"Updated last_search_id to {newest_id}")
+                    
+        except Exception as e:
+            logger.error(f"Search mentions loop error: {e}", exc_info=True)
+        
+        # Wait before next search
+        await asyncio.sleep(180)  # Run every 3 minutes
+
+async def hourly_post_loop():
+    while True:
+        try:
+            data = fetch_data(DEGEN_ADDR)
+            metrics = format_metrics(data)
+            raw = ask_grok("Write a one-sentence bullpost update on $DEGEN. Be promotional.")
+            tweet = truncate_to_sentence(metrics + raw, 560)
+            last = redis_client.get(f"{REDIS_PREFIX}last_hourly_post")
+            if tweet != last:
+                img = choice(glob.glob("raid_images/*.jpg"))
+                media_id = x_api.media_upload(img).media_id_string
+                await safe_tweet(tweet, media_id=media_id)
+                redis_client.set(f"{REDIS_PREFIX}last_hourly_post", tweet)
+        except Exception as e:
+            logger.error(f"Hourly post error: {e}")
+        await asyncio.sleep(3600)
+
+async def main():
+    await asyncio.gather(mention_loop(), search_mentions_loop(), hourly_post_loop())
+
+if __name__ == "__main__":
+    asyncio.run(main())).upper()
         addr = DEGEN_ADDR if sym=="DEGEN" else lookup_address(token)
         if addr:
-            img = choice(glob.glob("raid_images/*.jpg"))
-            media_id = x_api.media_upload(img).media_id_string
             await safe_tweet(
                 text=build_dex_reply(addr),
-                media_id=media_id,
                 in_reply_to_tweet_id=tw.id
             )
             redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))

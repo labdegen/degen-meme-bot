@@ -185,12 +185,34 @@ def format_metrics(d: dict) -> str:
         f"24h {'🟢' if d['change_24h']>=0 else '🔴'}{d['change_24h']:+.2f}%\n"
     )
 
+# Address lookup for non-DEGEN tokens
+def lookup_address(token: str) -> str:
+    t = token.lstrip('$')
+    if t.upper() == 'DEGEN':
+        return DEGEN_ADDR
+    # if it's an address, return directly
+    if ADDR_RE.fullmatch(t):
+        return t
+    try:
+        r = requests.get(DEXS_SEARCH_URL + t, timeout=10)
+        r.raise_for_status()
+        results = r.json().get('tokens', [])
+        for item in results:
+            if item.get('symbol', '').lower() == t.lower():
+                return item.get('contractAddress')
+        if results:
+            return results[0].get('contractAddress')
+    except Exception:
+        pass
+    return None
+
+# Build DEX reply with preview link
+
 def build_dex_reply(addr: str) -> str:
     data = fetch_data(addr)
     return format_metrics(data) + data['link']
 
-# Raid
-async def post_raid(tweet):
+# Raid feature\async def post_raid(tweet):
     prompt = (
         f"Write a one-liner bullpost for $DEGEN based on:\n'{tweet.text}'\n"
         f"Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. End with NFA."
@@ -219,7 +241,7 @@ async def handle_mention(tw):
     token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
     if token:
         sym = token.lstrip('$').upper()
-        addr = DEGEN_ADDR if sym=="DEGEN" else lookup_address(sym)
+        addr = DEGEN_ADDR if sym=="DEGEN" else lookup_address(token)
         if addr:
             await safe_tweet(build_dex_reply(addr), in_reply_to_tweet_id=tw.id)
             return

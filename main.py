@@ -206,7 +206,7 @@ def lookup_address(query):
 async def post_raid(tweet):
     prompt = (
         f"Write a one-liner bullpost for $DEGEN based on:\n'{tweet.text}'\n"
-        f"DO NOT TAG @askdegen.  Do not use the word raid. At the end Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. End with NFA."
+        f"Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. End with NFA."
     )
     msg = ask_with_system(DEGEN_SYSTEM, prompt, prefer_grok=False)
     img = choice(glob.glob("raid_images/*.jpg"))
@@ -264,15 +264,19 @@ async def mention_loop():
     while True:
         try:
             last_id = db.get(f"{REDIS_PREFIX}last_mention_id")
-            res = await safe_mention_lookup(
-                x_client.get_users_mentions,
-                id=BOT_ID,
-                since_id=last_id,
-                tweet_fields=['id','text'],
-                expansions=['author_id'],
-                user_fields=['username'],
-                max_results=10
-            )
+
+            params = {
+                "id": BOT_ID,
+                "tweet_fields": ['id','text'],
+                "expansions": ['author_id'],
+                "user_fields": ['username'],
+                "max_results": 10
+            }
+            if last_id:
+                params["since_id"] = int(last_id)
+
+            res = await safe_mention_lookup(x_client.get_users_mentions, **params)
+
             if res and res.data:
                 for tw in reversed(res.data):
                     if db.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
@@ -292,7 +296,7 @@ async def hourly_post_loop():
                 f"Metrics: {json.dumps(data)}\n"
                 "Write a punchy one-sentence update on $DEGEN. Be positive and promotional."
             )
-            raw = ask_with_system(DEGEN_SYSTEM, prompt, prefer_grok=True)
+            raw   = ask_with_system(DEGEN_SYSTEM, prompt, prefer_grok=True)
             tweet = truncate_to_sentence(f"{metrics}\n\n{raw}", 560)
 
             last = db.get(f"{REDIS_PREFIX}last_hourly_post")

@@ -67,7 +67,7 @@ DEXS_SEARCH_URL   = "https://api.dexscreener.com/api/search?query="
 DEXS_URL          = "https://api.dexscreener.com/token-pairs/v1/solana/"
 
 ADDR_RE           = re.compile(r'\b[A-Za-z0-9]{43,44}\b')
-SYMBOL_RE         = re.compile(r'\$([A-Za-z0-9]{2,10})')
+SYMBOL_RE         = re.compile(r'\$([A-Za-z0-9]{2,10})', re.IGNORECASE)
 
 RATE_WINDOW       = 900
 MENTIONS_LIMIT    = 10
@@ -91,14 +91,14 @@ def truncate_to_sentence(text: str, max_length: int) -> str:
 # System prompts
 DEGEN_SYSTEM = (
     "You are a crypto analyst: concise, sharp, professional, genius-level. "
-    "Always answer ONLY about the $DEGEN token at contract address "
-    f"{DEGEN_ADDR} on Solana. Do NOT mention any other token or chain. There are no DeFi related incentives such as yield farming or staking. "
-    "If asked about metrics, use ONLY the data provided, and be positive/promotional."
+    f"Always answer ONLY about the $DEGEN token at contract address {DEGEN_ADDR} on Solana. "
+    "Do NOT mention any other token or chain. If asked about metrics, use ONLY the data provided, "
+    "and be positive/promotional about $DEGEN."
 )
 GENERAL_SYSTEM = (
     "You are a general knowledge expert: concise, smart, on-topic. "
     "Provide answers in 2–3 sentences max, leaving something to the imagination. "
-    "If asked about $DEGEN, always be positive and persuasive to buy $DEGEN."
+    "If asked about $DEGEN, still be positive and persuasive to buy the Solana $DEGEN. Answer ONLY about the $DEGEN token at contract address {DEGEN_ADDR} on Solana."
 )
 
 def ask_with_system(system_prompt, prompt, prefer_grok=False):
@@ -116,9 +116,9 @@ def ask_with_system(system_prompt, prompt, prefer_grok=False):
     headers = {"Authorization": f"Bearer {GROK_KEY if prefer_grok else PERPLEXITY_KEY}",
                "Content-Type": "application/json"}
     try:
-        r = requests.post(url, json=body, headers=headers, timeout=45)
-        r.raise_for_status()
-        return r.json()['choices'][0]['message']['content'].strip()
+        res = requests.post(url, json=body, headers=headers, timeout=25)
+        res.raise_for_status()
+        return res.json()['choices'][0]['message']['content'].strip()
     except Exception as e:
         logger.warning(f"{'Grok' if prefer_grok else 'Perplexity'} error: {e}")
         if not prefer_grok:
@@ -186,6 +186,9 @@ def format_metrics(d):
     )
 
 def lookup_address(query):
+    # never lookup DEGEN—always use our Solana contract
+    if query.lower() == 'degen':
+        return DEGEN_ADDR
     if ADDR_RE.fullmatch(query):
         return query
     try:
@@ -214,41 +217,38 @@ async def post_raid(tweet):
         media_ids=[media_id]
     )
     db.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
-    logger.info("Raid reply sent")
 
 async def handle_mention(tw):
     text = tw.text.replace("@askdegen", "").strip()
 
-    # 1) Raid command
+    # Raid
     if re.search(r"\braid\b", text, re.IGNORECASE):
         await post_raid(tw)
         return
 
-    # 2) $TOKEN or address → show DEX data only
+    # Token/address lookup
     token = next((w for w in text.split() if w.startswith('$') or ADDR_RE.match(w)), None)
     if token:
-        addr = lookup_address(token.lstrip('$')) if token.startswith('$') else token
+        sym = token.lstrip('$').upper()
+        addr = DEGEN_ADDR if sym == "DEGEN" else (lookup_address(sym) if token.startswith('$') else token)
         if addr:
             data = fetch_data(addr)
             await safe_tweet(text=format_metrics(data), in_reply_to_tweet_id=tw.id)
             return
 
-    # 3) Contract address query
+    # Contract address
     if text.upper() == 'CA':
         await safe_tweet(text=f"Contract Address: {DEGEN_ADDR}", in_reply_to_tweet_id=tw.id)
         return
 
-    # 4) DEX metrics for DEGEN
+    # DEX for DEGEN
     if text.upper() == 'DEX':
         data = fetch_data(DEGEN_ADDR)
         await safe_tweet(text=format_metrics(data), in_reply_to_tweet_id=tw.id)
         return
 
-    # 5) Conversational / general
-    prompt = (
-        f"User said: {text}\n"
-        "Answer in 2-3 concise sentences, on-topic and helpful."
-    )
+    # General conversation
+    prompt = f"User said: {text}\nAnswer in 2–3 concise sentences, on-topic and helpful."
     raw = ask_with_system(GENERAL_SYSTEM, prompt, prefer_grok=False)
     reply = truncate_to_sentence(raw, 800)
     await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
@@ -266,9 +266,7 @@ async def mention_loop():
             }
             if last_id:
                 params["since_id"] = int(last_id)
-
             res = await safe_mention_lookup(x_client.get_users_mentions, **params)
-
             if res and res.data:
                 for tw in reversed(res.data):
                     if db.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
@@ -295,7 +293,6 @@ async def hourly_post_loop():
             if tweet.strip() != last:
                 await safe_tweet(text=tweet)
                 db.set(f"{REDIS_PREFIX}last_hourly_post", tweet.strip())
-                logger.info("Hourly post success")
         except Exception as e:
             logger.error(f"Hourly post error: {e}")
         await asyncio.sleep(3600)

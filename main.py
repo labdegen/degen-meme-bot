@@ -222,6 +222,7 @@ async def post_raid(tweet):
 async def handle_mention(tw):
     convo_id = tw.conversation_id or tw.id
 
+    # record root on first reply
     if db.hget(get_thread_key(convo_id), "count") is None:
         root_text = x_client.get_tweet(convo_id, tweet_fields=['text']).data.text
         update_thread(convo_id, f"ROOT: {root_text}", "")
@@ -234,55 +235,52 @@ async def handle_mention(tw):
         await post_raid(tw)
         return
 
-    # 2) token/address → metrics (with meme)
+    # 2) token/address → metrics (no meme, link preview)
     token = next((w for w in text.split() if w.startswith('$') or ADDR_RE.match(w)), None)
     if token:
         sym = token.lstrip('$').upper()
         addr = DEGEN_ADDR if sym=="DEGEN" else (lookup_address(sym) if token.startswith('$') else token)
         if addr:
-            data = fetch_data(addr)
-            img = choice(glob.glob("raid_images/*.jpg"))
-            media_id = x_api.media_upload(img).media_id_string
-            await safe_tweet(text=format_metrics(data),
-                             media_id=media_id,
-                             in_reply_to_tweet_id=tw.id)
+            await safe_tweet(
+                text=format_metrics(fetch_data(addr)),
+                in_reply_to_tweet_id=tw.id
+            )
             return
 
     # 3) CA
     if text.upper() == "CA":
-        img = choice(glob.glob("raid_images/*.jpg"))
-        media_id = x_api.media_upload(img).media_id_string
-        await safe_tweet(text=f"Contract Address: {DEGEN_ADDR}",
-                         media_id=media_id,
-                         in_reply_to_tweet_id=tw.id)
+        await safe_tweet(
+            text=f"Contract Address: {DEGEN_ADDR}",
+            in_reply_to_tweet_id=tw.id
+        )
         return
 
     # 4) DEX
     if text.upper() == "DEX":
-        data = fetch_data(DEGEN_ADDR)
-        img = choice(glob.glob("raid_images/*.jpg"))
-        media_id = x_api.media_upload(img).media_id_string
-        await safe_tweet(text=format_metrics(data),
-                         media_id=media_id,
-                         in_reply_to_tweet_id=tw.id)
+        await safe_tweet(
+            text=format_metrics(fetch_data(DEGEN_ADDR)),
+            in_reply_to_tweet_id=tw.id
+        )
         return
 
-    # 5) general: context + natural answer + DEGEN hype + CA + meme
+    # 5) general: include context + unique segue + CA + meme
     prompt = (
         f"History:{history}\nUser asked: \"{text}\"\n"
-        "First, respond naturally and concisely to that question. "
-        "Then, in a second sentence, say \"Kind of like stacking $DEGEN.\" "
-        "Do NOT include the contract address."
+        "First, answer naturally and concisely. "
+        "Then, in a second, gambler-style sentence, include a fresh tagline about stacking $DEGEN. "
+        "End with NFA."
     )
     raw = ask_grok(prompt)
-    reply_body = truncate_to_sentence(raw, 240)
+    reply_body = truncate_to_sentence(raw, 200)
     reply = f"{reply_body} Contract Address: {DEGEN_ADDR}"
 
     img = choice(glob.glob("raid_images/*.jpg"))
     media_id = x_api.media_upload(img).media_id_string
-    await safe_tweet(text=reply,
-                     media_id=media_id,
-                     in_reply_to_tweet_id=tw.id)
+    await safe_tweet(
+        text=reply,
+        media_id=media_id,
+        in_reply_to_tweet_id=tw.id
+    )
 
     update_thread(convo_id, text, reply)
     increment_thread(convo_id)

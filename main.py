@@ -12,11 +12,9 @@ from collections import deque
 from random import choice
 import glob
 
-# Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load environment variables
 load_dotenv()
 required_vars = [
     "X_API_KEY", "X_API_KEY_SECRET",
@@ -64,10 +62,10 @@ REDIS_PREFIX = "degen:"
 DEGEN_ADDR = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
 ADDR_RE = re.compile(r'^[A-Za-z0-9]{43,44}$')
 GROK_URL = "https://api.x.ai/v1/chat/completions"
-PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
+PERPLEXITY_URL = "https://api.perplexity.ai/v1/chat/completions"
 DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
 
-RATE_WINDOW = 900  # 15 minutes
+RATE_WINDOW = 900
 MENTIONS_LIMIT = 10
 TWEETS_LIMIT = 50
 mentions_timestamps = deque()
@@ -146,14 +144,14 @@ async def safe_tweet(text: str, **kwargs):
 def ask_perplexity(prompt):
     headers = {"Authorization": f"Bearer {PERPLEXITY_KEY}", "Content-Type": "application/json"}
     body = {
-        "model": "sonar-pro-chat",
+        "model": "sonar",  # safest model name as of May 2025
         "messages": [
             {
                 "role": "system",
                 "content": (
                     "You are a crypto analyst: concise, sharp, professional, and a bit edgy. "
-                    "Always answer ONLY about the $DEGEN token on Solana, contract address 6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f. "
-                    "Ignore any other chain or token. "
+                    "Always answer ONLY about the $DEGEN token on Solana, and never mention any other chain or token. "
+                    "DO NOT mention the contract address or 'on Solana' unless the user specifically asks for the contract address or says 'ca'. "
                     "Give unique, insightful, and evolving answers. Never mention a knowledge base or context."
                 )
             },
@@ -180,8 +178,8 @@ def ask_grok(prompt):
                 "role": "system",
                 "content": (
                     "You are a crypto analyst: concise, sharp, professional, and a bit edgy. "
-                    "Always answer ONLY about the $DEGEN token on Solana, contract address 6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f. "
-                    "Ignore any other chain or token. "
+                    "Always answer ONLY about the $DEGEN token on Solana, and never mention any other chain or token. "
+                    "DO NOT mention the contract address or 'on Solana' unless the user specifically asks for the contract address or says 'ca'. "
                     "Give unique, insightful, and evolving answers. Never mention a knowledge base or context."
                 )
             },
@@ -236,8 +234,8 @@ async def post_raid(tweet):
     text_low = tweet.text.lower()
     if '@askdegen' in text_low and 'raid' in text_low:
         prompt = (
-            "Write a short one-liner hype for $DEGEN on Solana (contract: 6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f) "
-            f"based on this: '{tweet.text}'. Mention @ogdegenonsol but don't say 'raid'."
+            "Write a short one-liner hype for $DEGEN on Solana based on this: "
+            f"'{tweet.text}'. Mention @ogdegenonsol but don't say 'raid'."
         )
         msg = ask_perplexity(prompt)
         img_list = glob.glob("raid_images/*.jpg")
@@ -299,15 +297,22 @@ async def mention_loop():
                         continue
 
                     txt = tw.text.replace('@askdegen', '').strip()
-                    # Always force DEGEN on Solana
+                    # Always force DEGEN on Solana, but do NOT mention contract or Solana unless asked
                     if "$DEGEN" in txt.upper() or "DEGEN" in txt.upper():
-                        data = fetch_data(DEGEN_ADDR)
-                        msg = ask_perplexity(f"All information must be about $DEGEN on Solana, contract address {DEGEN_ADDR}. Data: {json.dumps(data)}. User said: {txt}")
+                        if "ca" in txt.lower() or "contract" in txt.lower():
+                            msg = f"Contract Address: {DEGEN_ADDR}"
+                        else:
+                            data = fetch_data(DEGEN_ADDR)
+                            msg = ask_perplexity(
+                                f"User asked: {txt}\n"
+                                f"Respond ONLY about $DEGEN as the Solana token. "
+                                f"Do NOT mention contract address or Solana unless asked. Metrics: {json.dumps(data)}"
+                            )
+                    elif txt.lower() in ('ca', 'contract', 'contract address'):
+                        msg = f"Contract Address: {DEGEN_ADDR}"
                     elif txt.upper() == 'DEX':
                         data = fetch_data(DEGEN_ADDR)
                         msg = format_metrics(data)
-                    elif txt.upper() == 'CA':
-                        msg = f"Contract Address: {DEGEN_ADDR}"
                     else:
                         await handle_mention(tw)
                         continue
@@ -324,7 +329,8 @@ async def hourly_post_loop():
             data = fetch_data(DEGEN_ADDR)
             metrics = format_metrics(data)
             prompt = (
-                f"Give a punchy one-sentence update on $DEGEN on Solana (contract: {DEGEN_ADDR}) using these metrics, vary every hour."
+                f"Give a punchy one-sentence update on $DEGEN using these metrics, vary every hour. "
+                "Do NOT mention contract address or Solana unless specifically asked."
             )
             tweet = ask_perplexity(prompt)
             final = f"{metrics}\n\n{tweet}"

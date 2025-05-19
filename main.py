@@ -79,6 +79,11 @@ mentions_timestamps = deque()
 tweet_timestamps = deque()
 search_timestamps = deque()
 
+# Set initial search ID to current time-based ID to avoid the "since_id too old" error
+# Twitter IDs are roughly time-based, so this gives us a recent starting point
+current_time_ms = int(time.time() * 1000) - 1728000000  # Adjust for Twitter's epoch
+INITIAL_SEARCH_ID = str((current_time_ms << 22))
+
 # Helpers
 
 def truncate_to_sentence(text: str, max_length: int) -> str:
@@ -147,6 +152,12 @@ async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
         reset = int(e.response.headers.get('x-rate-limit-reset', time.time()+RATE_WINDOW))
         await asyncio.sleep(reset - time.time() + 1)
         return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
+    except tweepy.BadRequest as e:
+        # Pass BadRequest up to be handled by the caller
+        raise e
+    except Exception as e:
+        logger.error(f"API call error: {e}", exc_info=True)
+        raise e
     finally:
         timestamps_queue.append(time.time())
 
@@ -316,43 +327,57 @@ async def search_mentions_loop():
     New loop to handle searching for mentions that might not be captured by the mentions API,
     especially mentions in communities.
     """
+    # Initialize last_search_id if not present
+    if not redis_client.exists(f"{REDIS_PREFIX}last_search_id"):
+        redis_client.set(f"{REDIS_PREFIX}last_search_id", INITIAL_SEARCH_ID)
+        logger.info(f"Initialized last_search_id to {INITIAL_SEARCH_ID}")
+    
     while True:
         try:
-            last_search_id = redis_client.get(f"{REDIS_PREFIX}last_search_id") or "0"
             query = f"@{BOT_USERNAME} -is:retweet"
+            search_params = {
+                "query": query,
+                "tweet_fields": ["id", "text", "conversation_id", "created_at"],
+                "expansions": ["author_id"],
+                "user_fields": ["username"],
+                "max_results": 10
+            }
             
-            # Use Twitter API v2 search recent endpoint
-            search_results = await safe_search(
-                x_client.search_recent_tweets,
-                query=query,
-                since_id=last_search_id,
-                tweet_fields=["id", "text", "conversation_id", "created_at"],
-                expansions=["author_id"],
-                user_fields=["username"],
-                max_results=10
-            )
+            try:
+                # Always try without since_id first to avoid the age restriction error
+                search_results = await safe_search(
+                    x_client.search_recent_tweets,
+                    **search_params
+                )
+                logger.info("Successfully searched for community mentions")
+            except Exception as e:
+                logger.error(f"Search call failed: {e}", exc_info=True)
+                search_results = None
             
-            if search_results.data:
-                newest_id = "0"
+            if search_results and search_results.data:
+                newest_id = max(int(tw.id) for tw in search_results.data) if search_results.data else 0
+                
                 for tw in search_results.data:
                     # Skip if we've already processed this tweet
                     if redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
                         continue
                     
-                    # Update the newest ID we've seen
-                    if int(tw.id) > int(newest_id):
-                        newest_id = tw.id
+                    # Get the full tweet text from tw
+                    logger.info(f"Processing community mention: {tw.id} - {tw.text[:30]}...")
                     
                     # Process the mention
                     await handle_mention(tw)
                     redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
                 
                 # Update the last search ID
-                if newest_id != "0":
-                    redis_client.set(f"{REDIS_PREFIX}last_search_id", newest_id)
+                if newest_id > 0:
+                    redis_client.set(f"{REDIS_PREFIX}last_search_id", str(newest_id))
+                    logger.info(f"Updated last_search_id to {newest_id}")
                     
         except Exception as e:
-            logger.error(f"Search mentions loop error: {e}")
+            logger.error(f"Search mentions loop error: {e}", exc_info=True)
+        
+        # Wait before next search
         await asyncio.sleep(180)  # Run every 3 minutes
 
 async def hourly_post_loop():

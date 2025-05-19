@@ -282,12 +282,18 @@ async def handle_mention(tw):
         f"History:{history}\n"
         f"User asked: \"{txt}\"\n"
         "First, answer naturally and concisely. "
-        "Then, in a second gambler-style line, segue with a fresh tagline about stacking $DEGEN. End with NFA."
+        "Then, in a second gambler-style line, mention stacking $DEGEN. Do NOT include the contract address - I'll add it later. End with NFA."
     )
     raw = ask_grok(prompt)
     reply_body = truncate_to_sentence(raw, 200)
-    segue = "Good time to stack $DEGEN."
-    reply = f"{reply_body} {segue} Contract Address: {DEGEN_ADDR}"
+    
+    # Check if the response already contains $DEGEN mention
+    if "$DEGEN" not in reply_body:
+        reply = f"{reply_body} Good time to stack $DEGEN. Contract Address: {DEGEN_ADDR}"
+    else:
+        # If $DEGEN is already mentioned, just add the contract address
+        reply = f"{reply_body} Contract Address: {DEGEN_ADDR}"
+    
     img = choice(glob.glob("raid_images/*.jpg"))
     media_id = x_api.media_upload(img).media_id_string
     await safe_tweet(

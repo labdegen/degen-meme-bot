@@ -212,15 +212,25 @@ def build_dex_reply(addr: str) -> str:
     return format_metrics(data) + data['link']
 
 async def post_raid(tweet):
+    # Include thread history in raid prompt
+    convo_id = tweet.conversation_id or tweet.id
+    history = get_thread_history(convo_id)
     prompt = (
-        f"Write a one-liner bullpost for $DEGEN based on:\n'{tweet.text}'\n"
+        f"History:{history}
+User: '{tweet.text}'
+"
+        "Write a one-liner bullpost for $DEGEN based on the above. "
         f"Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. End with NFA."
     )
     msg = ask_grok(prompt)
     img = choice(glob.glob("raid_images/*.jpg"))
     media_id = x_api.media_upload(img).media_id_string
-    await safe_tweet(truncate_to_sentence(msg,240), media_id=media_id, in_reply_to_tweet_id=tweet.id)
-    redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
+    await safe_tweet(
+        text=truncate_to_sentence(msg,240),
+        media_id=media_id,
+        in_reply_to_tweet_id=tweet.id
+    )
+    redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
 
 async def handle_mention(tw):
     convo_id = tw.conversation_id or tw.id
@@ -245,17 +255,26 @@ async def handle_mention(tw):
     if txt.upper() in ("CA","DEX"):
         await safe_tweet(build_dex_reply(DEGEN_ADDR), in_reply_to_tweet_id=tw.id)
         return
-    # 4) general fallback
+        # 4) general fallback
     prompt = (
-        f"History:{history}\nUser asked: \"{txt}\"\n"
+        f"History:{history}
+User asked: \"{txt}\"
+"
         "First, answer naturally and concisely. "
         "Then, in a second gambler-style line, segue with a fresh tagline about stacking $DEGEN. End with NFA."
     )
     raw = ask_grok(prompt)
-    reply = truncate_to_sentence(raw,200) + f" Contract Address: {DEGEN_ADDR}"
+    # Add natural segue before contract address
+    reply_body = truncate_to_sentence(raw,200)
+    segue = "No matter what a good time to stack $DEGEN."
+    reply = f"{reply_body} {segue} CA: {DEGEN_ADDR}"
     img = choice(glob.glob("raid_images/*.jpg"))
     media_id = x_api.media_upload(img).media_id_string
-    await safe_tweet(reply, media_id=media_id, in_reply_to_tweet_id=tw.id)
+    await safe_tweet(
+        text=reply,
+        media_id=media_id,
+        in_reply_to_tweet_id=tw.id
+    )
     update_thread(convo_id, txt, reply)
     increment_thread(convo_id)
 

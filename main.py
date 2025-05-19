@@ -96,7 +96,7 @@ DEGEN_SYSTEM = (
     "If asked about metrics, use ONLY the data provided, and be positive/promotional."
 )
 GENERAL_SYSTEM = (
-    "You are a genius level, top-tier crypto analyst, professor, therapist and historian: concise, smart, on-topic. "
+    "You are a general knowledge expert: concise, smart, on-topic. "
     "Provide answers in 2–3 sentences max, leaving something to the imagination. "
     "If asked about $DEGEN, always be positive and persuasive to buy $DEGEN."
 )
@@ -125,7 +125,6 @@ def ask_with_system(system_prompt, prompt, prefer_grok=False):
             return ask_with_system(system_prompt, prompt, prefer_grok=True)
         return "Unable to provide an update at this time."
 
-# Rate-guarded Twitter
 async def safe_mention_lookup(fn, *args, **kwargs):
     now = time.time()
     while mentions_timestamps and now - mentions_timestamps[0] > RATE_WINDOW:
@@ -156,7 +155,6 @@ async def safe_tweet(text: str, **kwargs):
     finally:
         tweet_timestamps.append(time.time())
 
-# DEX data helpers
 def fetch_data(addr):
     try:
         r = requests.get(f"{DEXS_URL}{addr}", timeout=10)
@@ -202,7 +200,6 @@ def lookup_address(query):
         pass
     return None
 
-# Raid feature
 async def post_raid(tweet):
     prompt = (
         f"Write a one-liner bullpost for $DEGEN based on:\n'{tweet.text}'\n"
@@ -210,15 +207,15 @@ async def post_raid(tweet):
     )
     msg = ask_with_system(DEGEN_SYSTEM, prompt, prefer_grok=False)
     img = choice(glob.glob("raid_images/*.jpg"))
+    media_id = x_api.media_upload(img).media_id_string
     await safe_tweet(
         text=truncate_to_sentence(msg, 450),
         in_reply_to_tweet_id=tweet.id,
-        media_ids=[x_api.media_upload(img).media_id_string]
+        media_ids=[media_id]
     )
     db.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
     logger.info("Raid reply sent")
 
-# Mention handler
 async def handle_mention(tw):
     text = tw.text.replace("@askdegen", "").strip()
 
@@ -248,21 +245,18 @@ async def handle_mention(tw):
         return
 
     # 5) Conversational / general
-
-   prompt = (
+    prompt = (
         f"User said: {text}\n"
         "Answer in 2-3 concise sentences, on-topic and helpful."
-   )
-   raw = ask_with_system(GENERAL_SYSTEM, prompt, prefer_grok=False)
+    )
+    raw = ask_with_system(GENERAL_SYSTEM, prompt, prefer_grok=False)
+    reply = truncate_to_sentence(raw, 800)
+    await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
 
-     reply = truncate_to_sentence(raw, 800)
-     await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
-# Loops
 async def mention_loop():
     while True:
         try:
             last_id = db.get(f"{REDIS_PREFIX}last_mention_id")
-
             params = {
                 "id": BOT_ID,
                 "tweet_fields": ['id','text'],

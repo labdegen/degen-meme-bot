@@ -59,26 +59,25 @@ oauth = tweepy.OAuth1UserHandler(API_KEY, API_KEY_SECRET, ACCESS_TOKEN, ACCESS_T
 x_api = tweepy.API(oauth)
 
 # Constants
-REDIS_PREFIX = "degen:"
-DEGEN_ADDR   = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
-GROK_URL     = "https://api.x.ai/v2/chat/completions"
-PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
-DEXS_SEARCH_URL = "https://api.dexscreener.com/api/search?query="
-DEXS_URL     = "https://api.dexscreener.com/token-pairs/v1/solana/"
+REDIS_PREFIX      = "degen:"
+DEGEN_ADDR        = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
+GROK_URL          = "https://api.x.ai/v1/chat/completions"   # use v1 endpoint
+PERPLEXITY_URL    = "https://api.perplexity.ai/chat/completions"
+DEXS_SEARCH_URL   = "https://api.dexscreener.com/api/search?query="
+DEXS_URL          = "https://api.dexscreener.com/token-pairs/v1/solana/"
 
-ADDR_RE      = re.compile(r'\b[A-Za-z0-9]{43,44}\b')
-SYMBOL_RE    = re.compile(r'\$([A-Za-z0-9]{2,10})')
+ADDR_RE           = re.compile(r'\b[A-Za-z0-9]{43,44}\b')
+SYMBOL_RE         = re.compile(r'\$([A-Za-z0-9]{2,10})')
 
-RATE_WINDOW      = 900
-MENTIONS_LIMIT   = 10
-TWEETS_LIMIT     = 50
+RATE_WINDOW       = 900
+MENTIONS_LIMIT    = 10
+TWEETS_LIMIT      = 50
 mentions_timestamps = deque()
 tweet_timestamps    = deque()
 
 RECENT_REPLIES_KEY   = f"{REDIS_PREFIX}recent_replies"
 RECENT_REPLIES_LIMIT = 50
 
-# Truncate at last sentence boundary
 def truncate_to_sentence(text: str, max_length: int) -> str:
     if len(text) <= max_length:
         return text
@@ -89,7 +88,6 @@ def truncate_to_sentence(text: str, max_length: int) -> str:
             return snippet[: idx + 1 ]
     return snippet
 
-# Redis-backed recent replies/thread history
 def save_recent_reply(user_text, bot_text):
     entry = json.dumps({"user": user_text, "bot": bot_text})
     db.lpush(RECENT_REPLIES_KEY, entry)
@@ -118,14 +116,12 @@ def update_thread_history(convo_id, user_text, bot_text):
     db.hset(get_thread_key(convo_id), "history", new_history)
     db.expire(get_thread_key(convo_id), 86400)
 
-# Rate-limited Tweepy wrappers
 async def safe_mention_lookup(fn, *args, **kwargs):
     now = time.time()
     while mentions_timestamps and now - mentions_timestamps[0] > RATE_WINDOW:
         mentions_timestamps.popleft()
     if len(mentions_timestamps) >= MENTIONS_LIMIT:
-        wait = RATE_WINDOW - (now - mentions_timestamps[0]) + 1
-        await asyncio.sleep(wait)
+        await asyncio.sleep(RATE_WINDOW - (now - mentions_timestamps[0]) + 1)
     try:
         res = fn(*args, **kwargs)
     except tweepy.TooManyRequests as e:
@@ -150,7 +146,6 @@ async def safe_tweet(text: str, **kwargs):
     tweet_timestamps.append(time.time())
     return resp
 
-# System prompts
 DEGEN_SYSTEM = (
     "You are a crypto analyst: concise, sharp, professional, genius-level. "
     "Always answer ONLY about the $DEGEN token at contract address "
@@ -164,8 +159,9 @@ GENERAL_SYSTEM = (
 )
 
 def ask_with_system(system_prompt, prompt, prefer_grok=False):
+    model = "grok-3-latest" if prefer_grok else "sonar-pro"
     body = {
-        "model": "sonar-pro",
+        "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user",   "content": prompt}
@@ -173,9 +169,9 @@ def ask_with_system(system_prompt, prompt, prefer_grok=False):
         "max_tokens": 180,
         "temperature": 0.8
     }
+    url = GROK_URL if prefer_grok else PERPLEXITY_URL
     headers = {"Authorization": f"Bearer {GROK_KEY if prefer_grok else PERPLEXITY_KEY}",
                "Content-Type": "application/json"}
-    url = GROK_URL if prefer_grok else PERPLEXITY_URL
     try:
         r = requests.post(url, json=body, headers=headers, timeout=25)
         r.raise_for_status()
@@ -186,7 +182,6 @@ def ask_with_system(system_prompt, prompt, prefer_grok=False):
             return ask_with_system(system_prompt, prompt, prefer_grok=True)
         return "Unable to provide an update at this time."
 
-# Dex data functions
 def fetch_data(addr):
     try:
         r = requests.get(f"{DEXS_URL}{addr}", timeout=10)
@@ -218,10 +213,8 @@ def format_metrics(d):
     )
 
 def lookup_address(query):
-    # explicit contract?
     if ADDR_RE.fullmatch(query):
         return query
-    # try Dexscreener search
     try:
         r = requests.get(DEXS_SEARCH_URL + query, timeout=10)
         r.raise_for_status()
@@ -235,12 +228,9 @@ def lookup_address(query):
         pass
     return None
 
-# Core mention handler
 async def handle_mention(tw):
     text = tw.text.replace("@askdegen", "").strip()
-    convo_id = getattr(tw, "conversation_id", None) or tw.id
-
-    # 1) DEGEN-specific questions
+    # DEGEN-specific
     if re.search(r"\bDEGEN\b", text, re.IGNORECASE) or re.search(r"\$DEGEN\b", text, re.IGNORECASE):
         data = fetch_data(DEGEN_ADDR)
         prompt = (
@@ -252,8 +242,7 @@ async def handle_mention(tw):
         reply = truncate_to_sentence(raw, 240)
         await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
         return
-
-    # 2) Any other token by symbol or contract
+    # Other token by symbol or address
     addr_match = ADDR_RE.search(text)
     sym_match  = SYMBOL_RE.search(text)
     if addr_match or sym_match:
@@ -262,8 +251,7 @@ async def handle_mention(tw):
             data = fetch_data(addr)
             await safe_tweet(text=format_metrics(data), in_reply_to_tweet_id=tw.id)
             return
-
-    # 3) General queries
+    # General query
     prompt = (
         f"User: {text}\n"
         "As the Stephen Hawking of crypto analysis, provide an insightful, on-topic answer."
@@ -272,7 +260,6 @@ async def handle_mention(tw):
     reply = truncate_to_sentence(raw, 240)
     await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
 
-# Loops
 async def mention_loop():
     while True:
         try:
@@ -300,14 +287,14 @@ async def mention_loop():
 async def hourly_post_loop():
     while True:
         try:
-            data = fetch_data(DEGEN_ADDR)
+            data    = fetch_data(DEGEN_ADDR)
             metrics = format_metrics(data)
             prompt = (
                 f"Metrics: {json.dumps(data)}\n"
                 "Write a punchy one-sentence update on $DEGEN at the contract above. "
                 "End on a complete sentence."
             )
-            raw = ask_with_system(DEGEN_SYSTEM, prompt, prefer_grok=True)
+            raw   = ask_with_system(DEGEN_SYSTEM, prompt, prefer_grok=True)
             tweet = truncate_to_sentence(f"{metrics}\n\n{raw}", 560)
 
             last = db.get(f"{REDIS_PREFIX}last_hourly_post")

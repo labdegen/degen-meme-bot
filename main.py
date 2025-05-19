@@ -96,7 +96,7 @@ DEGEN_SYSTEM = (
     "If asked about metrics, use ONLY the data provided, and be positive/promotional."
 )
 GENERAL_SYSTEM = (
-    "You are a top-tier crypto analyst: concise, smart, on-topic. "
+    "You are a genius level, top-tier crypto analyst, professor, therapist and historian: concise, smart, on-topic. "
     "Provide answers in 2–3 sentences max, leaving something to the imagination. "
     "If asked about $DEGEN, always be positive and persuasive to buy $DEGEN."
 )
@@ -248,17 +248,15 @@ async def handle_mention(tw):
         return
 
     # 5) Conversational / general
-    data = fetch_data(DEGEN_ADDR)
-    prompt = (
-        f"Metrics: {json.dumps(data)}\n"
-        f"User said: {text}\n"
-        "Reply in 2-3 concise sentences max. On-topic and useful. "
-        "If this is about $DEGEN, be positive and persuasive to buy $DEGEN."
-    )
-    raw = ask_with_system(GENERAL_SYSTEM, prompt, prefer_grok=True)
-    reply = truncate_to_sentence(raw, 800)
-    await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
 
+   prompt = (
+        f"User said: {text}\n"
+        "Answer in 2-3 concise sentences, on-topic and helpful."
+   )
+   raw = ask_with_system(GENERAL_SYSTEM, prompt, prefer_grok=False)
+
+     reply = truncate_to_sentence(raw, 800)
+     await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
 # Loops
 async def mention_loop():
     while True:

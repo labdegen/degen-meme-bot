@@ -48,7 +48,7 @@ db = redis.Redis(
 db.ping()
 logger.info("Redis connected")
 
-# Load knowledge file
+# Load knowledge file (optional, not used for fallback)
 try:
     with open("degen_knowledge.txt", "r", encoding="utf-8") as f:
         DEGEN_KNOWLEDGE = f.read()
@@ -169,18 +169,17 @@ def ask_perplexity(prompt):
             {
                 "role": "system",
                 "content": (
-                    "You're a crypto analyst with deep technical insight and market savvy. "
-                    "Respond with: chain analysis, sentiment, technical patterns, and keep it concise, professional, and a little edgy. "
-                    "Never mention a knowledge base or context explicitly."
+                    "You are a crypto analyst: concise, sharp, professional, and a bit edgy. "
+                    "Give unique, insightful, and evolving answers. Never mention a knowledge base or context."
                 )
             },
             {"role": "user", "content": prompt}
         ],
-        "max_tokens": 200,
-        "temperature": 0.9
+        "max_tokens": 180,
+        "temperature": 0.8
     }
     try:
-        r = requests.post(PERPLEXITY_URL, json=body, headers=headers, timeout=35)
+        r = requests.post(PERPLEXITY_URL, json=body, headers=headers, timeout=25)
         r.raise_for_status()
         return r.json()['choices'][0]['message']['content'].strip()
     except Exception as e:
@@ -193,15 +192,21 @@ def ask_grok(prompt):
     body = {
         "model": "grok-3",
         "messages": [
-            {"role": "system", "content": "You're a bold, aggressive crypto community voice. Use one fact from context."},
-            {"role": "user", "content": prompt + "\n" + DEGEN_KNOWLEDGE + "\nEnd with NFA."}
+            {
+                "role": "system",
+                "content": (
+                    "You are a crypto analyst: concise, sharp, professional, and a bit edgy. "
+                    "Give unique, insightful, and evolving answers. Never mention a knowledge base or context."
+                )
+            },
+            {"role": "user", "content": prompt}
         ],
-        "max_tokens": 200,
-        "temperature": 0.9
+        "max_tokens": 180,
+        "temperature": 0.8
     }
     headers = {"Authorization": f"Bearer {GROK_KEY}", "Content-Type": "application/json"}
     try:
-        r = requests.post(GROK_URL, json=body, headers=headers, timeout=35)
+        r = requests.post(GROK_URL, json=body, headers=headers, timeout=25)
         r.raise_for_status()
         reply = r.json()['choices'][0]['message']['content'].strip()
         if reply not in past:
@@ -210,7 +215,7 @@ def ask_grok(prompt):
         return reply
     except Exception as e:
         logger.error(f"Grok error: {e}")
-        return "$DEGEN. NFA."
+        return "Unable to provide an update at this time."
 
 # === Core Helpers ===
 
@@ -238,7 +243,6 @@ def fetch_data(addr=DEGEN_ADDR):
         r = requests.get(f"{DEXS_URL}{addr}", timeout=10)
         r.raise_for_status()
         data = r.json()
-        # Dexscreener returns a list, not a dict
         if isinstance(data, list) and len(data) > 0:
             data = data[0]
         base = data.get('baseToken', {})
@@ -266,7 +270,7 @@ def format_metrics(d):
 async def post_raid(tweet):
     text_low = tweet.text.lower()
     if '@askdegen' in text_low and 'raid' in text_low:
-        prompt = f"Write a short one-liner hype for $DEGEN based on this: '{tweet.text}'. Mention @ogdegenonsol but don't say 'raid'. End with NFA."
+        prompt = f"Write a short one-liner hype for $DEGEN based on this: '{tweet.text}'. Mention @ogdegenonsol but don't say 'raid'."
         msg = ask_perplexity(prompt)
         img_list = glob.glob("raid_images/*.jpg")
         media = x_api.media_upload(choice(img_list)) if img_list else None
@@ -344,7 +348,6 @@ async def mention_loop():
                     elif txt.upper() == 'CA':
                         msg = f"Contract Address: {DEGEN_ADDR}"
                     else:
-                        # Use enhanced memory and tone
                         await handle_mention(tw)
                         continue
 

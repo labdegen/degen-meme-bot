@@ -27,13 +27,13 @@ for v in required_vars:
     if not os.getenv(v):
         raise RuntimeError(f"Missing env var: {v}")
 
-API_KEY = os.getenv("X_API_KEY")
-API_KEY_SECRET = os.getenv("X_API_KEY_SECRET")
-ACCESS_TOKEN = os.getenv("X_ACCESS_TOKEN")
+API_KEY             = os.getenv("X_API_KEY")
+API_KEY_SECRET      = os.getenv("X_API_KEY_SECRET")
+ACCESS_TOKEN        = os.getenv("X_ACCESS_TOKEN")
 ACCESS_TOKEN_SECRET = os.getenv("X_ACCESS_TOKEN_SECRET")
-BEARER_TOKEN = os.getenv("X_BEARER_TOKEN")
-GROK_KEY = os.getenv("GROK_API_KEY")
-PERPLEXITY_KEY = os.getenv("PERPLEXITY_API_KEY")
+BEARER_TOKEN        = os.getenv("X_BEARER_TOKEN")
+GROK_KEY            = os.getenv("GROK_API_KEY")
+PERPLEXITY_KEY      = os.getenv("PERPLEXITY_API_KEY")
 
 db = redis.Redis(
     host=os.getenv("REDIS_HOST"),
@@ -59,20 +59,30 @@ oauth = tweepy.OAuth1UserHandler(API_KEY, API_KEY_SECRET, ACCESS_TOKEN, ACCESS_T
 x_api = tweepy.API(oauth)
 
 REDIS_PREFIX = "degen:"
-DEGEN_ADDR = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
-ADDR_RE = re.compile(r'^[A-Za-z0-9]{43,44}$')
-GROK_URL = "https://api.x.ai/v1/chat/completions"
+DEGEN_ADDR   = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
+ADDR_RE      = re.compile(r'^[A-Za-z0-9]{43,44}$')
+GROK_URL     = "https://api.x.ai/v1/chat/completions"
 PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
-DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
+DEXS_URL     = "https://api.dexscreener.com/token-pairs/v1/solana/"
 
-RATE_WINDOW = 900
-MENTIONS_LIMIT = 10
-TWEETS_LIMIT = 50
+RATE_WINDOW      = 900
+MENTIONS_LIMIT   = 10
+TWEETS_LIMIT     = 50
 mentions_timestamps = deque()
-tweet_timestamps = deque()
+tweet_timestamps    = deque()
 
-RECENT_REPLIES_KEY = f"{REDIS_PREFIX}recent_replies"
+RECENT_REPLIES_KEY   = f"{REDIS_PREFIX}recent_replies"
 RECENT_REPLIES_LIMIT = 50
+
+def truncate_to_sentence(text: str, max_length: int) -> str:
+    if len(text) <= max_length:
+        return text
+    snippet = text[:max_length]
+    for sep in ('. ', '! ', '? '):
+        idx = snippet.rfind(sep)
+        if idx != -1:
+            return snippet[: idx + 1 ]
+    return snippet
 
 def save_recent_reply(user_text, bot_text):
     entry = json.dumps({"user": user_text, "bot": bot_text})
@@ -81,8 +91,7 @@ def save_recent_reply(user_text, bot_text):
 
 def get_recent_replies(n=5):
     items = db.lrange(RECENT_REPLIES_KEY, 0, n-1)
-    replies = [json.loads(x) for x in items]
-    return replies
+    return [json.loads(x) for x in items]
 
 def get_thread_key(convo_id):
     return f"{REDIS_PREFIX}thread:{convo_id}"
@@ -142,17 +151,21 @@ async def safe_tweet(text: str, **kwargs):
     return resp
 
 def ask_perplexity(prompt):
-    headers = {"Authorization": f"Bearer {PERPLEXITY_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {PERPLEXITY_KEY}",
+        "Content-Type": "application/json"
+    }
     body = {
-        "model": "sonar-pro",  # safest model name as of May 2025
+        "model": "sonar-pro",
         "messages": [
             {
                 "role": "system",
                 "content": (
                     "You are a crypto analyst: concise, sharp, professional, and a bit edgy. "
-                    "Always answer ONLY about the $DEGEN token on Solana, and never mention any other chain or token. "
-                    "DO NOT mention the contract address or 'on Solana' unless the user specifically asks for the contract address or says 'ca'. "
-                    "Give unique, insightful, and evolving answers. Never mention a knowledge base or context."
+                    "Always answer ONLY about the $DEGEN token at contract address "
+                    "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f on Solana. "
+                    "Do NOT mention or describe any other token or chain. "
+                    "If unsure, simply state: 'I only cover $DEGEN at that address.'"
                 )
             },
             {"role": "user", "content": prompt}
@@ -178,9 +191,10 @@ def ask_grok(prompt):
                 "role": "system",
                 "content": (
                     "You are a crypto analyst: concise, sharp, professional, and a bit edgy. "
-                    "Always answer ONLY about the $DEGEN token on Solana, and never mention any other chain or token. "
-                    "DO NOT mention the contract address or 'on Solana' unless the user specifically asks for the contract address or says 'ca'. "
-                    "Give unique, insightful, and evolving answers. Never mention a knowledge base or context."
+                    "Always answer ONLY about the $DEGEN token at contract address "
+                    "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f on Solana. "
+                    "Do NOT mention or describe any other token or chain. "
+                    "If unsure, simply state: 'I only cover $DEGEN at that address.'"
                 )
             },
             {"role": "user", "content": prompt}
@@ -227,7 +241,8 @@ def format_metrics(d):
         f"🚀 {d.get('symbol', 'DEGEN')} | ${d.get('price_usd', 0):,.6f}\n"
         f"MC ${d.get('market_cap', 0):,.0f} | Vol24 ${d.get('volume_usd', 0):,.0f}\n"
         f"1h {'🟢' if d.get('change_1h', 0) >= 0 else '🔴'}{d.get('change_1h', 0):+.2f}% | "
-        f"24h {'🟢' if d.get('change_24h', 0) >= 0 else '🔴'}{d.get('change_24h', 0):+.2f}%\n{d.get('link', '')}"
+        f"24h {'🟢' if d.get('change_24h', 0) >= 0 else '🔴'}{d.get('change_24h', 0):+.2f}%\n"
+        f"{d.get('link', '')}"
     )
 
 async def post_raid(tweet):
@@ -241,7 +256,7 @@ async def post_raid(tweet):
         img_list = glob.glob("raid_images/*.jpg")
         media = x_api.media_upload(choice(img_list)) if img_list else None
         await safe_tweet(
-            text=msg[:240],
+            text=truncate_to_sentence(msg, 240),
             in_reply_to_tweet_id=tweet.id,
             media_ids=[media.media_id_string] if media else None
         )
@@ -249,27 +264,28 @@ async def post_raid(tweet):
         logger.info("Raid reply sent")
 
 async def handle_mention(tw):
-    convo_id = getattr(tw, 'conversation_id', None) or tw.id
-    convo_count = get_convo_count(convo_id)
+    convo_id     = getattr(tw, 'conversation_id', None) or tw.id
+    convo_count  = get_convo_count(convo_id)
     if convo_count >= 2:
         return
 
     history = get_thread_history(convo_id)
-    recent = get_recent_replies(5)
+    recent  = get_recent_replies(5)
     recent_str = "\n".join([f"User: {r['user']}\nBot: {r['bot']}" for r in recent])
 
     prompt = (
         f"Here are some of your most recent crypto takes:\n{recent_str}\n"
-        f"{history}\nUser: {tw.text}\nBot:"
+        f"{history}\nUser: {tw.text}\nBot:\n"
+        "Please respond in a complete, professional sentence or two, "
+        "and keep the total reply under 240 characters."
     )
-    response = ask_perplexity(prompt)
-    if convo_count == 1:
-        response += " [Degen Out]"
+    raw_reply = ask_perplexity(prompt)
+    reply     = truncate_to_sentence(raw_reply, 240)
 
-    await safe_tweet(text=response[:240], in_reply_to_tweet_id=tw.id)
-    update_thread_history(convo_id, tw.text, response)
+    await safe_tweet(text=reply, in_reply_to_tweet_id=tw.id)
+    update_thread_history(convo_id, tw.text, reply)
     increment_convo_count(convo_id)
-    save_recent_reply(tw.text, response)
+    save_recent_reply(tw.text, reply)
     db.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
 
 async def mention_loop():
@@ -292,12 +308,12 @@ async def mention_loop():
                         continue
                     db.set(f"{REDIS_PREFIX}last_mention_id", tid)
                     text_low = tw.text.lower()
+
                     if '@askdegen' in text_low and 'raid' in text_low:
                         await post_raid(tw)
                         continue
 
                     txt = tw.text.replace('@askdegen', '').strip()
-                    # Always force DEGEN on Solana, but do NOT mention contract or Solana unless asked
                     if "$DEGEN" in txt.upper() or "DEGEN" in txt.upper():
                         if "ca" in txt.lower() or "contract" in txt.lower():
                             msg = f"Contract Address: {DEGEN_ADDR}"
@@ -305,20 +321,22 @@ async def mention_loop():
                             data = fetch_data(DEGEN_ADDR)
                             msg = ask_perplexity(
                                 f"User asked: {txt}\n"
-                                f"Respond ONLY about $DEGEN as the Solana token. "
-                                f"Do NOT mention contract address or Solana unless asked. Metrics: {json.dumps(data)}"
+                                f"Metrics: {json.dumps(data)}\n"
+                                "Please respond in a complete, professional sentence or two, "
+                                "and keep the total reply under 240 characters."
                             )
+                        reply = truncate_to_sentence(msg, 240)
+                        await safe_tweet(text=reply, in_reply_to_tweet_id=tid)
+                        db.sadd(f"{REDIS_PREFIX}replied_ids", str(tid))
                     elif txt.lower() in ('ca', 'contract', 'contract address'):
-                        msg = f"Contract Address: {DEGEN_ADDR}"
+                        await safe_tweet(text=f"Contract Address: {DEGEN_ADDR}", in_reply_to_tweet_id=tid)
+                        db.sadd(f"{REDIS_PREFIX}replied_ids", str(tid))
                     elif txt.upper() == 'DEX':
                         data = fetch_data(DEGEN_ADDR)
-                        msg = format_metrics(data)
+                        await safe_tweet(text=format_metrics(data), in_reply_to_tweet_id=tid)
+                        db.sadd(f"{REDIS_PREFIX}replied_ids", str(tid))
                     else:
                         await handle_mention(tw)
-                        continue
-
-                    await safe_tweet(text=msg[:240], in_reply_to_tweet_id=tid)
-                    db.sadd(f"{REDIS_PREFIX}replied_ids", str(tid))
         except Exception as e:
             logger.error(f"Mention loop error: {e}")
         await asyncio.sleep(110)
@@ -326,19 +344,22 @@ async def mention_loop():
 async def hourly_post_loop():
     while True:
         try:
-            data = fetch_data(DEGEN_ADDR)
+            data    = fetch_data(DEGEN_ADDR)
             metrics = format_metrics(data)
-            prompt = (
-f"Respond ONLY about $DEGEN as the Solana token from contract address 6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7fs. "
-                f"Give a punchy one-sentence update on $DEGEN using these metrics, vary every hour. "
-                "Do NOT mention contract address or Solana unless specifically asked."
+            prompt  = (
+                "Respond ONLY about $DEGEN token at contract address "
+                "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f on Solana. "
+                "Give a punchy one-sentence update on $DEGEN using these metrics, vary every hour. "
+                "Please keep the total tweet under 560 characters and end on a complete sentence."
             )
-            tweet = ask_perplexity(prompt)
-            final = f"{metrics}\n\n{tweet}"
+            raw     = ask_perplexity(prompt)
+            combined = f"{metrics}\n\n{raw}"
+            tweet   = truncate_to_sentence(combined, 560)
+
             last = db.get(f"{REDIS_PREFIX}last_hourly_post")
-            if final.strip() != last:
-                await safe_tweet(text=final[:560])
-                db.set(f"{REDIS_PREFIX}last_hourly_post", final.strip())
+            if tweet.strip() != last:
+                await safe_tweet(text=tweet)
+                db.set(f"{REDIS_PREFIX}last_hourly_post", tweet.strip())
                 logger.info("Hourly post success")
             else:
                 logger.info("Skipped duplicate hourly post.")

@@ -120,7 +120,7 @@ def update_thread(cid, user_text, bot_text):
 # Grok prompt
 SYSTEM_PROMPT = (
     "You are a degenerate gambler crypto analyst: edgy, informal, risk-taking. No slang. High class but a little edgy like Don Draper. "
-    f"IF DEGEN, or $DEGEN is mentioned, always ONLY speak about the $DEGEN token at contract address {DEGEN_ADDR}. "
+    "IF DEGEN, or $DEGEN is mentioned, always ONLY speak about the $DEGEN token at contract address {DEGEN_ADDR}. DO not include the contract address in the reply. "
     "Do NOT mention any other token or chain when it comes to DEGEN.  Other tokens you can reply honestly."
 )
 
@@ -313,15 +313,11 @@ async def handle_mention(tw):
         # Ensure we have a complete response that doesn't get cut off
         reply_body = raw.strip()
         
-        # Make sure the response contains $DEGEN mention and contract address
-        if "$DEGEN" not in reply_body:
-            reply = f"{reply_body}\n\nStack $DEGEN! Contract Address: {DEGEN_ADDR}"
-        else:
-            # If $DEGEN is already mentioned, just add the contract address if needed
-            if DEGEN_ADDR not in reply_body:
-                reply = f"{reply_body}\n\nContract Address: {DEGEN_ADDR}"
-            else:
-                reply = reply_body
+    reminder = f"As always, stack more $DEGEN ca:{DEGEN_ADDR}"
+    if reminder not in reply_body:
+        reply = f"{reply_body}\n\n{reminder}"
+    else:
+        reply = reply_body
         
         # Ensure we're not exceeding Twitter's character limit
         if len(reply) > 260:

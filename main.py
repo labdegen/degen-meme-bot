@@ -133,7 +133,7 @@ def ask_grok(prompt: str) -> str:
     }
     headers = {"Authorization": f"Bearer {os.getenv('GROK_API_KEY')}", "Content-Type": "application/json"}
     try:
-        r = requests.post(GROK_URL, json=payload, headers=headers, timeout=920)
+        r = requests.post(GROK_URL, json=payload, headers=headers, timeout=20)
         r.raise_for_status()
         return r.json()['choices'][0]['message']['content'].strip()
     except Exception as e:

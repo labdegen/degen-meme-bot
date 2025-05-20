@@ -321,7 +321,7 @@ async def handle_mention(tw):
         
         # Ensure we're not exceeding Twitter's character limit
         if len(reply) > 260:
-            reply = truncate_to_sentence(reply, 220) + f"\n\nContract Address: {DEGEN_ADDR}"
+            reply = truncate_to_sentence(reply, 220) + f"\n\nAs always keep stacking $DEGEN. ca: {DEGEN_ADDR}"
         
         img = choice(glob.glob("raid_images/*.jpg"))
         media_id = x_api.media_upload(img).media_id_string

@@ -510,71 +510,50 @@ async def search_mentions_loop():
 async def hourly_post_loop():
     # Create a list of varied prompts for Grok to generate different types of content
     grok_prompts = [
-        "Write a positive one-sentence analytical update on $DEGEN using data from the last hour.",
-        "Write a degenerate gambler's hot take on $DEGEN's price action. Be edgy and risky.",
-        "Create a short, bold prediction about $DEGEN's upcoming performance. Make it exciting.",
-        "Write a brief FOMO-inducing statement about $DEGEN. Make people feel they're missing out.",
-        "Create a humorous one-liner about $DEGEN's current market position.",
-        "Write a short, cryptic message about $DEGEN that implies insider knowledge.",
-        "Create a 'this is financial advice' joke about $DEGEN (while clarifying it's not).",
-        "Write a short, savage comment about people who haven't bought $DEGEN yet.",
-        "Create a brief statement comparing $DEGEN to the broader crypto market.",
-        "Write a line about diamond hands and $DEGEN's future potential."
+        "Write a positive one-sentence analytical update on $DEGEN using data from the last hour. No slang.  High class but a little edgy like Don Draper.",
+        "Write a degenerate gambler's hot take on $DEGEN's price action. Be edgy and risky.  No slang.  High class but a little edgy like Don Draper.",
+        "Create a short, bold prediction about $DEGEN's upcoming performance. Make it exciting.  No slang.  High class but a little edgy like Don Draper.",
+        "Write a brief FOMO-inducing statement about $DEGEN. Make people feel they're missing out.  No slang.  High class but a little edgy like Don Draper.",
+        "Create a humorous one-liner about $DEGEN's current market position.  No slang.  High class but a little edgy like Don Draper.",
+        "Write a short, cryptic message about $DEGEN that implies insider knowledge.  No slang.  High class but a little edgy like Don Draper.",
+        "Create a 'this is financial advice' joke about $DEGEN (while clarifying it's not).  No slang.  High class but a little edgy like Don Draper.",
+        "Write a short, savage comment about people who haven't bought $DEGEN yet.  No slang.  High class but a little edgy like Don Draper.",
+        "Create a brief statement comparing $DEGEN to the broader crypto market.  No slang.  High class but a little edgy like Don Draper.",
+        "Write a line about diamond hands and $DEGEN's future potential.  No slang.  High class but a little edgy like Don Draper."
     ]
     
-    # Track the hour to rotate through content styles
     hour_counter = 0
     
     while True:
         try:
+            # Fetch on‐chain and market data
             data = fetch_data(DEGEN_ADDR)
             metrics = format_metrics(data)
-            
-            # Get the DEXScreener link from the data
             dex_link = data.get('link', f"https://dexscreener.com/solana/{DEGEN_ADDR}")
             
-            # Select a prompt based on the current hour
-            prompt_index = hour_counter % len(grok_prompts)
-            selected_prompt = grok_prompts[prompt_index]
-            
-            # Sometimes include metrics, sometimes don't for variety
-            include_metrics = hour_counter % 3 != 0  # Skip metrics every third hour
-            
-            # Ask Grok for content
+            # Pick a non‐slang prompt
+            selected_prompt = grok_prompts[hour_counter % len(grok_prompts)]
             raw = ask_grok(selected_prompt)
             
-            # Construct tweet with or without metrics
-            if include_metrics:
-                tweet_content = metrics + raw
-            else:
-                tweet_content = raw
-                
-            # Include the DEXScreener link in the tweet for preview image
-            tweet = truncate_to_sentence(tweet_content, 530) + "\n\n" + dex_link
+            # Always include the metrics block, then the one‐liner, then the preview link
+            tweet = (
+                metrics.rstrip() +  # price block
+                "\n\n" +
+                raw.strip() +       # professional one‐liner
+                "\n\n" +
+                dex_link            # link for preview image
+            )
             
-            # Add hashtags occasionally for additional variety
-            if hour_counter % 4 == 0:  # Every fourth hour
-                hashtags = choice([
-                    "#DEGEN #SOL #Crypto",
-                    "#DEGENArmy #Solana",
-                    "#ToTheMoon #DEGEN",
-                    "#CryptoTwitter #DEGEN",
-                    "#DEGEN #Web3"
-                ])
-                tweet = truncate_to_sentence(tweet_content, 490) + "\n\n" + hashtags + "\n" + dex_link
-            
+            # Only post if it’s changed
             last = redis_client.get(f"{REDIS_PREFIX}last_hourly_post")
             if tweet != last:
-                # Post without attaching a media image since the link will provide the preview
                 await safe_tweet(tweet)
                 redis_client.set(f"{REDIS_PREFIX}last_hourly_post", tweet)
             
-            # Increment hour counter
             hour_counter += 1
-            
         except Exception as e:
             logger.error(f"Hourly post error: {e}")
-            
+        
         await asyncio.sleep(3600)
 
 async def main():

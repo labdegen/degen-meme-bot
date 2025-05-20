@@ -1,16 +1,17 @@
-import tweepy
-import requests
 import os
-from dotenv import load_dotenv
-import logging
 import re
+import time
+import glob
+import logging
+import requests
 import redis
 import json
 import asyncio
-import time
 from collections import deque
 from random import choice
-import glob
+from dotenv import load_dotenv
+import tweepy
+import openai
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -18,16 +19,20 @@ logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
-required = [
+required_env_vars = [
     "X_API_KEY", "X_API_KEY_SECRET",
     "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET",
     "X_BEARER_TOKEN",
     "GROK_API_KEY",
+    "OPENAI_API_KEY",
     "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"
 ]
-for var in required:
+for var in required_env_vars:
     if not os.getenv(var):
         raise RuntimeError(f"Missing env var: {var}")
+
+# OpenAI (GPT-4o) setup for fallback
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # Twitter API setup
 oauth = tweepy.OAuth1UserHandler(
@@ -67,22 +72,17 @@ GROK_URL = "https://api.x.ai/v1/chat/completions"
 DEXS_SEARCH_URL = "https://api.dexscreener.com/api/search?query="
 DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
 
+# Regex for addresses
 ADDR_RE = re.compile(r"\b[A-Za-z0-9]{43,44}\b")
-SYMBOL_RE = re.compile(r"\$([A-Za-z0-9]{2,10})", re.IGNORECASE)
-USERNAME_RE = re.compile(rf"@{BOT_USERNAME}\b", re.IGNORECASE)  # Match bot's username
 
+# Rate limits
 RATE_WINDOW = 900
 MENTIONS_LIMIT = 10
 TWEETS_LIMIT = 50
-SEARCH_LIMIT = 10  # Limit for search API calls
+SEARCH_LIMIT = 10
 mentions_timestamps = deque()
 tweet_timestamps = deque()
 search_timestamps = deque()
-
-# Set initial search ID to current time-based ID to avoid the "since_id too old" error
-# Twitter IDs are roughly time-based, so this gives us a recent starting point
-current_time_ms = int(time.time() * 1000) - 1728000000  # Adjust for Twitter's epoch
-INITIAL_SEARCH_ID = str((current_time_ms << 22))
 
 # Helpers
 
@@ -96,7 +96,8 @@ def truncate_to_sentence(text: str, max_length: int) -> str:
             return snippet[:idx+1]
     return snippet
 
-# Thread memory helpers
+# Thread memory
+
 def get_thread_key(cid):
     return f"{REDIS_PREFIX}thread:{cid}"
 
@@ -114,34 +115,73 @@ def update_thread(cid, user_text, bot_text):
     redis_client.hset(get_thread_key(cid), "history", new_hist)
     redis_client.expire(get_thread_key(cid), 86400)
 
-# Grok prompt
+# System prompt for models
 SYSTEM_PROMPT = (
     "You are a degenerate gambler crypto analyst: edgy, informal, risk-taking. "
     f"Always speak about the $DEGEN token at contract address {DEGEN_ADDR}. "
     "Do NOT mention any other token or chain."
 )
 
-def ask_grok(prompt: str) -> str:
+# Synchronous Grok helper with retries
+def _ask_grok_sync(prompt: str) -> str:
     payload = {
         "model": "grok-3-latest",
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt}
+            {"role": "user",   "content": prompt}
         ],
         "max_tokens": 180,
         "temperature": 0.8
     }
-    headers = {"Authorization": f"Bearer {os.getenv('GROK_API_KEY')}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {os.getenv('GROK_API_KEY')}",
+        "Content-Type": "application/json"
+    }
+    for attempt in range(3):
+        try:
+            r = requests.post(GROK_URL, json=payload, headers=headers, timeout=10)
+            r.raise_for_status()
+            return r.json()['choices'][0]['message']['content'].strip()
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response else None
+            if status and 500 <= status < 600:
+                wait = 2 ** attempt
+                logger.warning(f"Grok 5xx ({status}), retrying in {wait}s…")
+                time.sleep(wait)
+                continue
+            logger.warning(f"Grok HTTP error: {e}")
+            break
+        except Exception as e:
+            logger.warning(f"Grok network error: {e}")
+            break
+    return "Unable to provide an update at this time."
+
+# Async wrapper with GPT-4o fallback
+async def ask_grok(prompt: str) -> str:
+    # Run Grok call off the event loop
+grok_response = await asyncio.to_thread(_ask_grok_sync, prompt)
+    if not grok_response.startswith("Unable"):
+        return grok_response
+    # Fallback to OpenAI GPT-4o
     try:
-        r = requests.post(GROK_URL, json=payload, headers=headers, timeout=20)
-        r.raise_for_status()
-        return r.json()['choices'][0]['message']['content'].strip()
+        resp = await openai.ChatCompletion.acreate(
+            model="gpt-4o-latest",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user",   "content": prompt}
+            ],
+            max_tokens=180,
+            temperature=0.8
+        )
+        return resp.choices[0].message.content.strip()
     except Exception as e:
-        logger.warning(f"Grok error: {e}")
+        logger.warning(f"OpenAI fallback error: {e}")
         return "Unable to provide an update at this time."
 
+# Async rate-limited wrapper
+def _now(): return time.time()
 async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
-    now = time.time()
+    now = _now()
     while timestamps_queue and now - timestamps_queue[0] > RATE_WINDOW:
         timestamps_queue.popleft()
     if len(timestamps_queue) >= limit:
@@ -152,14 +192,8 @@ async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
         reset = int(e.response.headers.get('x-rate-limit-reset', time.time()+RATE_WINDOW))
         await asyncio.sleep(reset - time.time() + 1)
         return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
-    except tweepy.BadRequest as e:
-        # Pass BadRequest up to be handled by the caller
-        raise e
-    except Exception as e:
-        logger.error(f"API call error: {e}", exc_info=True)
-        raise e
     finally:
-        timestamps_queue.append(time.time())
+        timestamps_queue.append(_now())
 
 async def safe_mention_lookup(fn, *args, **kwargs):
     return await safe_api_call(fn, mentions_timestamps, MENTIONS_LIMIT, *args, **kwargs)
@@ -170,10 +204,10 @@ async def safe_search(fn, *args, **kwargs):
 async def safe_tweet(text: str, media_id=None, **kwargs):
     return await safe_api_call(
         lambda t, m, **kw: x_client.create_tweet(text=t, media_ids=[m] if m else None, **kw),
-        tweet_timestamps, 
+        tweet_timestamps,
         TWEETS_LIMIT,
-        text, 
-        media_id, 
+        text,
+        media_id,
         **kwargs
     )
 
@@ -225,19 +259,17 @@ def build_dex_reply(addr: str) -> str:
     data = fetch_data(addr)
     return format_metrics(data) + data['link']
 
+# Handlers
 async def post_raid(tweet):
-    """
-    Include thread history in raid prompt and post a bullpost with a random meme.
-    """
     convo_id = tweet.conversation_id or tweet.id
     history = get_thread_history(convo_id)
     prompt = (
         f"History:{history}\n"
         f"User: '{tweet.text}'\n"
-        "Write a one-liner bullpost for $DEGEN based on the above. "
-        f"Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. End with NFA."
+        "Write a one-liner bullpost for $DEGEN based on the above."
+        f" Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. End with NFA."
     )
-    msg = ask_grok(prompt)
+    msg = await ask_grok(prompt)
     img = choice(glob.glob("raid_images/*.jpg"))
     media_id = x_api.media_upload(img).media_id_string
     await safe_tweet(
@@ -258,12 +290,12 @@ async def handle_mention(tw):
     history = get_thread_history(convo_id)
     txt = re.sub(rf"@{BOT_USERNAME}\b", "", tw.text, flags=re.IGNORECASE).strip()
 
-    # 1) raid
+    # raid
     if re.search(r"\braid\b", txt, re.IGNORECASE):
         await post_raid(tw)
         return
 
-    # 2) token/address -> DEX preview
+    # token/address -> DEX preview
     token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
     if token:
         sym = token.lstrip('$').upper()
@@ -272,19 +304,19 @@ async def handle_mention(tw):
             await safe_tweet(build_dex_reply(addr), in_reply_to_tweet_id=tw.id)
             return
 
-    # 3) CA/DEX commands
+    # CA/DEX commands
     if txt.upper() in ("CA", "DEX"):
         await safe_tweet(build_dex_reply(DEGEN_ADDR), in_reply_to_tweet_id=tw.id)
         return
 
-    # 4) general fallback
+    # fallback
     prompt = (
         f"History:{history}\n"
         f"User asked: \"{txt}\"\n"
-        "First, answer naturally and concisely. "
-        "Then, in a second gambler-style line, segue with a fresh tagline about stacking $DEGEN. End with NFA."
+        "First, answer naturally and concisely."
+        " Then, in a second gambler-style line, segue with a fresh tagline about stacking $DEGEN. End with NFA."
     )
-    raw = ask_grok(prompt)
+    raw = await ask_grok(prompt)
     reply_body = truncate_to_sentence(raw, 200)
     segue = "Good time to stack $DEGEN."
     reply = f"{reply_body} {segue} Contract Address: {DEGEN_ADDR}"
@@ -298,6 +330,7 @@ async def handle_mention(tw):
     update_thread(convo_id, txt, reply)
     increment_thread(convo_id)
 
+# Loops
 async def mention_loop():
     while True:
         try:
@@ -317,21 +350,14 @@ async def mention_loop():
                     if redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
                         continue
                     redis_client.set(f"{REDIS_PREFIX}last_mention_id", tw.id)
-                    await handle_mention(tw)
+                    asyncio.create_task(handle_mention(tw))
         except Exception as e:
             logger.error(f"Mention loop error: {e}")
         await asyncio.sleep(110)
 
 async def search_mentions_loop():
-    """
-    New loop to handle searching for mentions that might not be captured by the mentions API,
-    especially mentions in communities.
-    """
-    # Initialize last_search_id if not present
     if not redis_client.exists(f"{REDIS_PREFIX}last_search_id"):
-        redis_client.set(f"{REDIS_PREFIX}last_search_id", INITIAL_SEARCH_ID)
-        logger.info(f"Initialized last_search_id to {INITIAL_SEARCH_ID}")
-    
+        redis_client.set(f"{REDIS_PREFIX}last_search_id", str(int(time.time()*1000)))
     while True:
         try:
             query = f"@{BOT_USERNAME} -is:retweet"
@@ -342,50 +368,27 @@ async def search_mentions_loop():
                 "user_fields": ["username"],
                 "max_results": 10
             }
-            
-            try:
-                # Always try without since_id first to avoid the age restriction error
-                search_results = await safe_search(
-                    x_client.search_recent_tweets,
-                    **search_params
-                )
-                logger.info("Successfully searched for community mentions")
-            except Exception as e:
-                logger.error(f"Search call failed: {e}", exc_info=True)
-                search_results = None
-            
-            if search_results and search_results.data:
-                newest_id = max(int(tw.id) for tw in search_results.data) if search_results.data else 0
-                
-                for tw in search_results.data:
-                    # Skip if we've already processed this tweet
+            results = await safe_search(x_client.search_recent_tweets, **search_params)
+            logger.info("Successfully searched for community mentions")
+            if results and results.data:
+                newest_id = max(int(tw.id) for tw in results.data)
+                for tw in results.data:
                     if redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
                         continue
-                    
-                    # Get the full tweet text from tw
-                    logger.info(f"Processing community mention: {tw.id} - {tw.text[:30]}...")
-                    
-                    # Process the mention
-                    await handle_mention(tw)
+                    logger.info(f"Processing community mention: {tw.id} - {tw.text[:30]}...)")
+                    asyncio.create_task(handle_mention(tw))
                     redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-                
-                # Update the last search ID
-                if newest_id > 0:
-                    redis_client.set(f"{REDIS_PREFIX}last_search_id", str(newest_id))
-                    logger.info(f"Updated last_search_id to {newest_id}")
-                    
+                redis_client.set(f"{REDIS_PREFIX}last_search_id", str(newest_id))
         except Exception as e:
             logger.error(f"Search mentions loop error: {e}", exc_info=True)
-        
-        # Wait before next search
-        await asyncio.sleep(180)  # Run every 3 minutes
+        await asyncio.sleep(180)
 
 async def hourly_post_loop():
     while True:
         try:
             data = fetch_data(DEGEN_ADDR)
             metrics = format_metrics(data)
-            raw = ask_grok("Write a one-sentence bullpost update on $DEGEN. Be promotional.")
+            raw = await ask_grok("Write a one-sentence bullpost update on $DEGEN. Be promotional.")
             tweet = truncate_to_sentence(metrics + raw, 560)
             last = redis_client.get(f"{REDIS_PREFIX}last_hourly_post")
             if tweet != last:
@@ -398,7 +401,11 @@ async def hourly_post_loop():
         await asyncio.sleep(3600)
 
 async def main():
-    await asyncio.gather(mention_loop(), search_mentions_loop(), hourly_post_loop())
+    await asyncio.gather(
+        mention_loop(),
+        search_mentions_loop(),
+        hourly_post_loop()
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -399,11 +399,12 @@ async def hourly_post_loop():
             logger.error(f"Hourly post error: {e}")
         await asyncio.sleep(3600)
 
-if __name__ == "__main__":
-    asyncio.run(
-        asyncio.gather(
-            mention_loop(),
-            search_mentions_loop(),
-            hourly_post_loop()
-        )
+async def main():
+    await asyncio.gather(
+        mention_loop(),
+        search_mentions_loop(),
+        hourly_post_loop()
     )
+
+if __name__ == "__main__":
+    asyncio.run(main())

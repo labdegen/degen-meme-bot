@@ -119,7 +119,7 @@ def update_thread(cid, user_text, bot_text):
 
 # Grok prompt
 SYSTEM_PROMPT = (
-    "You are a degenerate gambler crypto analyst: edgy, informal, risk-taking. "
+    "You are a degenerate gambler crypto analyst: edgy, informal, risk-taking. No slang. High class but a little edgy like Don Draper. "
     f"Always speak about the $DEGEN token at contract address {DEGEN_ADDR}. "
     "Do NOT mention any other token or chain."
 )
@@ -239,7 +239,7 @@ async def post_raid(tweet):
             f"History:{history}\n"
             f"User: '{tweet.text}'\n"
             "Write a one-liner bullpost for $DEGEN based on the above. "
-            f"Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. End with NFA."
+            f"Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. End with NFA. No slang. High class but a little edgy like Don Draper."
         )
         msg = ask_grok(prompt)
         img = choice(glob.glob("raid_images/*.jpg"))
@@ -306,7 +306,7 @@ async def handle_mention(tw):
             f"History:{history}\n"
             f"User asked: \"{txt}\"\n"
             "First, answer naturally and concisely. "
-            "Then, in a second gambler-style line, mention stacking $DEGEN. End with NFA."
+            "Then, in a second gambler-style line, mention stacking $DEGEN. End with NFA. No slang.  High class but a little edgy like Don Draper."
         )
         raw = ask_grok(prompt)
         
@@ -403,7 +403,7 @@ async def handle_mention(tw):
             f"History:{history}\n"
             f"User asked: \"{txt}\"\n"
             "First, answer naturally and concisely. "
-            "Then, in a second gambler-style line, mention stacking $DEGEN. End with NFA."
+            "Then, in a second gambler-style line, mention stacking $DEGEN. End with NFA. No slang.  High class but a little edgy like Don Draper."
         )
         raw = ask_grok(prompt)
         
@@ -510,50 +510,49 @@ async def search_mentions_loop():
 async def hourly_post_loop():
     # Create a list of varied prompts for Grok to generate different types of content
     grok_prompts = [
-        "Write a positive one-sentence analytical update on $DEGEN using data from the last hour. No slang.  High class but a little edgy like Don Draper.",
-        "Write a degenerate gambler's hot take on $DEGEN's price action. Be edgy and risky.  No slang.  High class but a little edgy like Don Draper.",
-        "Create a short, bold prediction about $DEGEN's upcoming performance. Make it exciting.  No slang.  High class but a little edgy like Don Draper.",
-        "Write a brief FOMO-inducing statement about $DEGEN. Make people feel they're missing out.  No slang.  High class but a little edgy like Don Draper.",
-        "Create a humorous one-liner about $DEGEN's current market position.  No slang.  High class but a little edgy like Don Draper.",
-        "Write a short, cryptic message about $DEGEN that implies insider knowledge.  No slang.  High class but a little edgy like Don Draper.",
-        "Create a 'this is financial advice' joke about $DEGEN (while clarifying it's not).  No slang.  High class but a little edgy like Don Draper.",
-        "Write a short, savage comment about people who haven't bought $DEGEN yet.  No slang.  High class but a little edgy like Don Draper.",
-        "Create a brief statement comparing $DEGEN to the broader crypto market.  No slang.  High class but a little edgy like Don Draper.",
-        "Write a line about diamond hands and $DEGEN's future potential.  No slang.  High class but a little edgy like Don Draper."
+        "Write a positive one-sentence analytical update on $DEGEN using data from the last hour. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper.",
+        "Write a degenerate gambler's hot take on $DEGEN's price action. Be edgy and risky. Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
+        "Create a short, bold prediction about $DEGEN's upcoming performance. Make it exciting. Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
+        "Write a brief FOMO-inducing statement about $DEGEN. Make people feel they're missing out. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper.",
+        "Create a humorous one-liner about $DEGEN's current market position.Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
+        "Write a short, cryptic message about $DEGEN that implies insider knowledge. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper.",
+        "Create a 'this is financial advice' joke about $DEGEN (while clarifying it's not).Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
+        "Write a short, savage comment about people who haven't bought $DEGEN yet. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper.",
+        "Create a brief statement comparing $DEGEN to the broader crypto market.Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
+        "Write a line about diamond hands and $DEGEN's future potential. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper."
     ]
     
-    hour_counter = 0
-    
+     hour_counter = 0
+
     while True:
         try:
-            # Fetch on‐chain and market data
-            data = fetch_data(DEGEN_ADDR)
-            metrics = format_metrics(data)
+            # Fetch on-chain and market data
+            data     = fetch_data(DEGEN_ADDR)
+            metrics  = format_metrics(data)
             dex_link = data.get('link', f"https://dexscreener.com/solana/{DEGEN_ADDR}")
-            
-            # Pick a non‐slang prompt
+
+            # Ask Grok for a clean one-liner
             selected_prompt = grok_prompts[hour_counter % len(grok_prompts)]
-            raw = ask_grok(selected_prompt)
-            
-            # Always include the metrics block, then the one‐liner, then the preview link
+            raw             = ask_grok(selected_prompt).strip()
+
+            # Build tweet: metrics block, one-liner, then link on its own line
             tweet = (
-                metrics.rstrip() +  # price block
+                metrics.rstrip() +
                 "\n\n" +
-                raw.strip() +       # professional one‐liner
+                raw +
                 "\n\n" +
-                dex_link            # link for preview image
+                dex_link
             )
-            
-            # Only post if it’s changed
+
+            # Only post if it’s new
             last = redis_client.get(f"{REDIS_PREFIX}last_hourly_post")
             if tweet != last:
                 await safe_tweet(tweet)
                 redis_client.set(f"{REDIS_PREFIX}last_hourly_post", tweet)
-            
+
             hour_counter += 1
         except Exception as e:
             logger.error(f"Hourly post error: {e}")
-        
         await asyncio.sleep(3600)
 
 async def main():

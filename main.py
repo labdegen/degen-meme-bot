@@ -35,7 +35,7 @@ REQUIRED_ENV_VARS = [
     "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET",
     "X_BEARER_TOKEN",
     "GROK_API_KEY",
-    "REDIS_URL"  # Changed to REDIS_URL for Render compatibility
+    "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"
 ]
 
 missing_vars = [v for v in REQUIRED_ENV_VARS if not os.getenv(v)]
@@ -96,11 +96,15 @@ shutdown_event = asyncio.Event()
 @asynccontextmanager
 async def get_redis_connection():
     """Context manager for Redis connections with automatic reconnection."""
-    redis_url = os.getenv("REDIS_URL")
     client = None
     try:
-        # Parse Redis URL for Render compatibility
-        client = redis.from_url(redis_url, decode_responses=True)
+        # Use individual Redis parameters
+        client = redis.Redis(
+            host=os.getenv("REDIS_HOST"),
+            port=int(os.getenv("REDIS_PORT", "6379")),
+            password=os.getenv("REDIS_PASSWORD"),
+            decode_responses=True
+        )
         # Test connection
         await asyncio.to_thread(client.ping)
         logger.info("🔑 Redis connected")

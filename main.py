@@ -308,7 +308,8 @@ async def handle_mention(tw):
             "First, answer naturally and concisely. "
             "Then, in a second gambler-style line, mention stacking $DEGEN. End with NFA. No slang.  High class but a little edgy like Don Draper."
         )
-         raw = ask_grok(prompt)
+        
+	raw = ask_grok(prompt)
         reply_body = raw.strip()
 
         # Custom stack reminder, only append once

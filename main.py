@@ -248,26 +248,60 @@ def format_metrics(d: Dict[str, Any]) -> str:
 async def lookup_address(token: str) -> Optional[str]:
     """Look up a token's contract address by symbol or return the address if already provided."""
     t = token.lstrip("$")
+    
+    # Always prioritize DEGEN
     if t.upper() == "DEGEN":
         return DEGEN_ADDR
+    
+    # If it's already an address format, just return it
     if ADDR_RE.fullmatch(t):
         return t
     
+    # Handle API search with better error management
     try:
+        logger.info(f"Looking up token: {t}")
         resp = await asyncio.to_thread(
             requests.get,
             DEXS_SEARCH_URL + t,
             timeout=10
         )
+        
+        # Check for successful response
         if resp.status_code != 200:
             logger.warning(f"Dex search for '{t}' returned {resp.status_code}")
+            if resp.status_code == 404:
+                logger.info(f"Token '{t}' not found in DEX Screener")
+            return None
+        
+        # Parse response data
+        data = resp.json()
+        toks = data.get("tokens", [])
+        
+        if not toks:
+            logger.info(f"No tokens found for '{t}'")
             return None
             
-        toks = resp.json().get("tokens", [])
+        # Try exact match first
         for item in toks:
             if item.get("symbol", "").lower() == t.lower():
-                return item.get("contractAddress")
-        return toks[0].get("contractAddress") if toks else None
+                addr = item.get("contractAddress")
+                if addr:
+                    logger.info(f"Found exact match for '{t}': {addr}")
+                    return addr
+        
+        # Fall back to first result if available
+        addr = toks[0].get("contractAddress")
+        if addr:
+            logger.info(f"Using first result for '{t}': {addr}")
+            return addr
+        return None
+        
+    except requests.exceptions.Timeout:
+        logger.warning(f"Timeout looking up token '{t}'")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.warning(f"Request error looking up token '{t}': {e}")
+        return None
     except Exception as e:
         logger.warning(f"Error looking up token '{t}': {e}")
         return None
@@ -420,16 +454,314 @@ async def handle_mention(tw):
         return
 
     # 3) Handle token/address lookup
-    token = next((w for w in txt.split() if SYMBOL_RE.match(w) or ADDR_RE.match(w)), None)
-    if token:
-        addr = DEGEN_ADDR if token.lstrip("$").upper() == "DEGEN" else await lookup_address(token)
+    token_match = None
+    
+    # First check for symbols with $ prefix
+    symbols = re.findall(SYMBOL_RE, txt)
+    if symbols:
+        token_match = f"${symbols[0]}"
+    
+    # Then check for addresses
+    if not token_match:
+        addresses = re.findall(ADDR_RE, txt)
+        if addresses:
+            token_match = addresses[0]
+    
+    # If we found a token or address
+    if token_match:
+        logger.info(f"Found token reference in tweet: {token_match}")
+        
+        # If it's DEGEN or another token
+        if token_match.lstrip("$").upper() == "DEGEN":
+            metrics = format_metrics(await fetch_data(DEGEN_ADDR))
+            await safe_tweet(metrics + f"\n{DEGEN_ADDR}", in_reply_to_tweet_id=tw.id)
+            await asyncio.to_thread(redis_client.sadd, f"{REDIS_PREFIX}replied_ids", str(tw.id))
+            return
+        
+        # Try to look up any other token
+        addr = await lookup_address(token_match)
         if addr:
             metrics = format_metrics(await fetch_data(addr))
             await safe_tweet(metrics + f"\n{addr}", in_reply_to_tweet_id=tw.id)
             await asyncio.to_thread(redis_client.sadd, f"{REDIS_PREFIX}replied_ids", str(tw.id))
             return
         else:
-            logger.info(f"No address found for token '{token}', falling back to Grok.")
+            # If lookup failed, redirect to DEGEN instead of falling through
+            logger.info(f"No address found for token '{token_match}', redirecting to DEGEN")
+            metrics = format_metrics(await fetch_data(DEGEN_ADDR))
+            
+            # Generate a response that acknowledges the request but pivots to DEGEN
+            hist = await get_thread_history(cid)
+            prompt = (f"History:{hist}\nUser asked about token '{token_match.lstrip('
+
+# ——— LOOPS —————————————————————————————————————
+
+async def mention_loop():
+    """Monitor mentions and respond to them."""
+    logger.info("Starting mention monitoring loop")
+    
+    error_backoff = 1
+    
+    while not shutdown_event.is_set():
+        try:
+            # Get the latest mention ID
+            last = await asyncio.to_thread(redis_client.get, f"{REDIS_PREFIX}last_mention_id")
+            
+            # Prepare request parameters
+            params = {
+                "id": BOT_ID,
+                "tweet_fields": ["id", "text", "conversation_id"],
+                "max_results": 10
+            }
+            if last:
+                params["since_id"] = int(last)
+                
+            # Fetch mentions
+            res = await safe_mention_lookup(x_client.get_users_mentions, **params)
+            
+            if res and res.data:
+                for tw in reversed(res.data):
+                    # Check if we've already replied
+                    is_replied = await asyncio.to_thread(
+                        redis_client.sismember,
+                        f"{REDIS_PREFIX}replied_ids",
+                        str(tw.id)
+                    )
+                    
+                    if not is_replied:
+                        # Update the last mention ID
+                        await asyncio.to_thread(
+                            redis_client.set,
+                            f"{REDIS_PREFIX}last_mention_id",
+                            tw.id
+                        )
+                        # Handle the mention
+                        await handle_mention(tw)
+            
+            # Reset backoff on success
+            error_backoff = 1
+            
+        except Exception as e:
+            logger.exception(f"Mention loop error: {e}")
+            # Exponential backoff on errors
+            await asyncio.sleep(error_backoff * 10)
+            error_backoff = min(error_backoff * 2, 60)  # Cap at 10 minutes
+            
+        # Regular polling interval
+        await asyncio.sleep(110)
+
+async def search_mentions_loop():
+    """Search for mentions that might be missed by the mentions API."""
+    logger.info("Starting search mentions loop")
+    
+    # Initialize last search ID if it doesn't exist
+    exists = await asyncio.to_thread(redis_client.exists, f"{REDIS_PREFIX}last_search_id")
+    if not exists:
+        await asyncio.to_thread(redis_client.set, f"{REDIS_PREFIX}last_search_id", INITIAL_SEARCH_ID)
+    
+    error_backoff = 1
+    
+    while not shutdown_event.is_set():
+        try:
+            # Search for recent mentions
+            res = await safe_search(
+                x_client.search_recent_tweets,
+                query=f"@{BOT_USERNAME} -is:retweet",
+                tweet_fields=["id", "text", "conversation_id"],
+                max_results=10
+            )
+            
+            if res and res.data:
+                # Find the newest tweet ID
+                newest = max(int(t.id) for t in res.data)
+                
+                for tw in res.data:
+                    # Check if we've already replied
+                    is_replied = await asyncio.to_thread(
+                        redis_client.sismember, 
+                        f"{REDIS_PREFIX}replied_ids", 
+                        str(tw.id)
+                    )
+                    
+                    if not is_replied:
+                        await handle_mention(tw)
+                
+                # Update the last search ID
+                await asyncio.to_thread(
+                    redis_client.set,
+                    f"{REDIS_PREFIX}last_search_id",
+                    str(newest)
+                )
+            
+            # Reset backoff on success
+            error_backoff = 1
+            
+        except Exception as e:
+            logger.exception(f"Search loop error: {e}")
+            # Exponential backoff on errors
+            await asyncio.sleep(error_backoff * 10)
+            error_backoff = min(error_backoff * 2, 60)  # Cap at 10 minutes
+            
+        # Regular polling interval
+        await asyncio.sleep(180)
+
+async def hourly_post_loop():
+    """Post hourly updates about the DEGEN token."""
+    logger.info("Starting hourly post loop")
+    
+    error_backoff = 1
+    
+    while not shutdown_event.is_set():
+        try:
+            # Fetch token data
+            data = await fetch_data(DEGEN_ADDR)
+            metrics = format_metrics(data)
+            
+            # Get the bullish update from Grok
+            raw = await ask_grok("Write a one-sentence bullpost update on $DEGEN. Be promotional.")
+            tweet = truncate_to_sentence(metrics + raw, 560)
+            
+            # Check if this is different from the last post
+            last = await asyncio.to_thread(redis_client.get, f"{REDIS_PREFIX}last_hourly_post")
+            
+            if tweet != last:
+                # Try to attach an image
+                try:
+                    img_files = glob.glob("raid_images/*.jpg")
+                    if img_files:
+                        img = random.choice(img_files)
+                        media_id = await upload_media(img)
+                        await safe_tweet(tweet, media_id=media_id)
+                    else:
+                        await safe_tweet(tweet)
+                except Exception as e:
+                    logger.error(f"Error with hourly post image: {e}")
+                    # Fall back to text-only tweet
+                    await safe_tweet(tweet)
+                
+                # Update the last hourly post
+                await asyncio.to_thread(redis_client.set, f"{REDIS_PREFIX}last_hourly_post", tweet)
+            
+            # Reset backoff on success
+            error_backoff = 1
+            
+        except Exception as e:
+            logger.exception(f"Hourly post error: {e}")
+            # Exponential backoff on errors
+            await asyncio.sleep(error_backoff * 60)
+            error_backoff = min(error_backoff * 2, 60)  # Cap at 60 minutes
+            
+        # Regular hourly interval (adjusted for any processing time)
+        await asyncio.sleep(3600)
+
+# ——— RENDER SPECIFIC ——————————————————————————————
+
+async def health_check_loop():
+    """Simple health check for Render."""
+    while not shutdown_event.is_set():
+        logger.info("Health check: Bot is running")
+        await asyncio.sleep(600)  # 10 minutes
+
+def handle_sigterm():
+    """Handle SIGTERM signal from Render."""
+    logger.info("Received SIGTERM, initiating shutdown")
+    shutdown_event.set()
+
+# ——— MAIN —————————————————————————————————————
+
+async def setup():
+    """Setup global resources."""
+    global redis_client, BOT_ID, BOT_USERNAME
+    
+    # Connect to Redis
+    async with get_redis_connection() as r:
+        redis_client = r
+        
+        # Get bot identity from twitter api
+        try:
+            me = await asyncio.to_thread(x_client.get_me)
+            BOT_ID = me.data.id
+            BOT_USERNAME = me.data.username
+            logger.info(f"Authenticated as @{BOT_USERNAME} (ID: {BOT_ID})")
+        except Exception as e:
+            logger.error(f"Failed to get bot identity: {e}")
+            raise
+            
+async def main():
+    """Main entry point."""
+    # Register signal handlers for Render
+    signal.signal(signal.SIGTERM, lambda s, f: handle_sigterm())
+    
+    try:
+        # Setup resources
+        await setup()
+        
+        # Start all the loops
+        tasks = [
+            asyncio.create_task(mention_loop()),
+            asyncio.create_task(search_mentions_loop()),
+            asyncio.create_task(hourly_post_loop()),
+            asyncio.create_task(health_check_loop())
+        ]
+        
+        # Wait for all tasks to complete or shutdown signal
+        _, pending = await asyncio.wait(
+            tasks,
+            return_when=asyncio.FIRST_COMPLETED,
+            timeout=None
+        )
+        
+        # Cancel any pending tasks
+        for task in pending:
+            task.cancel()
+            
+        # Wait for tasks to finish cancelling
+        await asyncio.gather(*pending, return_exceptions=True)
+        
+    except Exception as e:
+        logger.critical(f"Critical error in main: {e}")
+        # Exit gracefully but with error code
+        return 1
+    finally:
+        logger.info("Bot is shutting down")
+    
+    return 0
+
+if __name__ == "__main__":
+    try:
+        exit_code = asyncio.run(main())
+        exit(exit_code)
+    except KeyboardInterrupt:
+        logger.info("Received keyboard interrupt, shutting down")
+        exit(0)
+)}' but it's not found. "
+                     "Write a short reply that redirects them to $DEGEN instead. Be fun and edgy. End with NFA.")
+            
+            redirect_msg = await ask_grok(prompt)
+            
+            try:
+                img_files = glob.glob("raid_images/*.jpg")
+                if img_files:
+                    img = random.choice(img_files)
+                    media_id = await upload_media(img)
+                    await safe_tweet(
+                        f"{redirect_msg}\n\n{metrics}\n{DEGEN_ADDR}", 
+                        media_id=media_id, 
+                        in_reply_to_tweet_id=tw.id
+                    )
+                else:
+                    await safe_tweet(
+                        f"{redirect_msg}\n\n{metrics}\n{DEGEN_ADDR}", 
+                        in_reply_to_tweet_id=tw.id
+                    )
+                
+                await update_thread(cid, txt, redirect_msg)
+                await increment_thread(cid)
+                await asyncio.to_thread(redis_client.sadd, f"{REDIS_PREFIX}replied_ids", str(tw.id))
+                return
+            except Exception as e:
+                logger.error(f"Error with redirect message: {e}")
+                # Continue to general fallback
 
     # 4) General fallback - use Grok AI
     hist = await get_thread_history(cid)

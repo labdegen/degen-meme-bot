@@ -343,41 +343,102 @@ async def handle_mention(tw):
         # Mark the tweet as replied to avoid getting stuck in a loop
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
 
-async def mention_loop():
-    while True:
-        try:
-            last = redis_client.get(f"{REDIS_PREFIX}last_mention_id")
-            params = {
-                "id": BOT_ID,
-                "tweet_fields": ["id", "text", "conversation_id"],
-                "expansions": ["author_id"],
-                "user_fields": ["username"],
-                "max_results": 10
-            }
-            if last:
-                params["since_id"] = int(last)
-            res = await safe_mention_lookup(x_client.get_users_mentions, **params)
-            if res and res.data:
-                for tw in reversed(res.data):
-                    # IMMEDIATELY skip any tweet in our blocklist
-                    if str(tw.id) in BLOCKED_TWEET_IDS:
-                        logger.info(f"Skipping blocked tweet ID: {tw.id}")
-                        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-                        continue
-                        
-                    if redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
-                        continue
-                    redis_client.set(f"{REDIS_PREFIX}last_mention_id", tw.id)
-                    try:
-                        await handle_mention(tw)
-                    except Exception as e:
-                        logger.error(f"Error handling mention {tw.id}: {e}", exc_info=True)
-                        # Mark as replied to avoid getting stuck
-                        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-        except Exception as e:
-            logger.error(f"Mention loop error: {e}")
-        await asyncio.sleep(110)
+async def handle_mention(tw):
+    try:
+        convo_id = tw.conversation_id or tw.id
+        if redis_client.hget(get_thread_key(convo_id), "count") is None:
+            try:
+                root = x_client.get_tweet(convo_id, tweet_fields=['text']).data.text
+                update_thread(convo_id, f"ROOT: {root}", "")
+            except Exception as e:
+                logger.warning(f"Failed to get root tweet: {e}")
+                update_thread(convo_id, f"ROOT: Unknown", "")
+        history = get_thread_history(convo_id)
+        txt = re.sub(rf"@{BOT_USERNAME}\b", "", tw.text, flags=re.IGNORECASE).strip()
 
+        # 1) raid
+        if re.search(r"\braid\b", txt, re.IGNORECASE):
+            await post_raid(tw)
+            return
+
+        # 2) Check for CA command (contract address only)
+        if re.search(r"\bca\b", txt, re.IGNORECASE) and not re.search(r"\b(dex|contract|address)\b", txt, re.IGNORECASE):
+            await safe_tweet(
+                text=f"$DEGEN Contract Address: {DEGEN_ADDR}",
+                in_reply_to_tweet_id=tw.id
+            )
+            redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+            return
+
+        # 3) Check for DEX or other contract address commands
+        if re.search(r"\b(dex|contract|address)\b", txt, re.IGNORECASE):
+            # Include the DEXScreener link to generate preview instead of attaching a meme
+            dex_data = fetch_data(DEGEN_ADDR)
+            dex_link = dex_data.get('link', f"https://dexscreener.com/solana/{DEGEN_ADDR}")
+            await safe_tweet(
+                text=f"{build_dex_reply(DEGEN_ADDR)}",
+                in_reply_to_tweet_id=tw.id
+            )
+            redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+            return
+
+        # 4) token/address -> DEX preview
+        token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
+        if token:
+            sym = token.lstrip('$').upper()
+            addr = DEGEN_ADDR if sym=="DEGEN" else lookup_address(token)
+            if addr:
+                # Include the DEXScreener link to generate preview instead of attaching a meme
+                dex_data = fetch_data(addr)
+                dex_link = dex_data.get('link', f"https://dexscreener.com/solana/{addr}")
+                await safe_tweet(
+                    text=build_dex_reply(addr),
+                    in_reply_to_tweet_id=tw.id
+                )
+                redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+                return
+
+        # 5) general fallback
+        prompt = (
+            f"History:{history}\n"
+            f"User asked: \"{txt}\"\n"
+            "First, answer naturally and concisely. "
+            "Then, in a second gambler-style line, mention stacking $DEGEN. End with NFA."
+        )
+        raw = ask_grok(prompt)
+        
+        # Ensure we have a complete response that doesn't get cut off
+        reply_body = raw.strip()
+        
+        # Make sure the response contains $DEGEN mention and contract address
+        if "$DEGEN" not in reply_body:
+            reply = f"{reply_body}\n\nStack $DEGEN! Contract Address: {DEGEN_ADDR}"
+        else:
+            # If $DEGEN is already mentioned, just add the contract address if needed
+            if DEGEN_ADDR not in reply_body:
+                reply = f"{reply_body}\n\nContract Address: {DEGEN_ADDR}"
+            else:
+                reply = reply_body
+        
+        # Ensure we're not exceeding Twitter's character limit
+        if len(reply) > 260:
+            reply = truncate_to_sentence(reply, 220) + f"\n\nContract Address: {DEGEN_ADDR}"
+        
+        img = choice(glob.glob("raid_images/*.jpg"))
+        media_id = x_api.media_upload(img).media_id_string
+        
+        await safe_tweet(
+            text=reply,
+            media_id=media_id,
+            in_reply_to_tweet_id=tw.id
+        )
+        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+        update_thread(convo_id, txt, reply)
+        increment_thread(convo_id)
+    except Exception as e:
+        logger.error(f"Error handling mention {tw.id}: {e}", exc_info=True)
+        # Mark the tweet as replied to avoid getting stuck in a loop
+        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
 async def search_mentions_loop():
     """
     New loop to handle searching for mentions that might not be captured by the mentions API,
@@ -447,20 +508,73 @@ async def search_mentions_loop():
         await asyncio.sleep(180)  # Run every 3 minutes
 
 async def hourly_post_loop():
+    # Create a list of varied prompts for Grok to generate different types of content
+    grok_prompts = [
+        "Write a positive one-sentence analytical update on $DEGEN using data from the last hour.",
+        "Write a degenerate gambler's hot take on $DEGEN's price action. Be edgy and risky.",
+        "Create a short, bold prediction about $DEGEN's upcoming performance. Make it exciting.",
+        "Write a brief FOMO-inducing statement about $DEGEN. Make people feel they're missing out.",
+        "Create a humorous one-liner about $DEGEN's current market position.",
+        "Write a short, cryptic message about $DEGEN that implies insider knowledge.",
+        "Create a 'this is financial advice' joke about $DEGEN (while clarifying it's not).",
+        "Write a short, savage comment about people who haven't bought $DEGEN yet.",
+        "Create a brief statement comparing $DEGEN to the broader crypto market.",
+        "Write a line about diamond hands and $DEGEN's future potential."
+    ]
+    
+    # Track the hour to rotate through content styles
+    hour_counter = 0
+    
     while True:
         try:
             data = fetch_data(DEGEN_ADDR)
             metrics = format_metrics(data)
-            raw = ask_grok("Write a one-sentence bullpost update on $DEGEN. Be promotional.")
-            tweet = truncate_to_sentence(metrics + raw, 560)
+            
+            # Get the DEXScreener link from the data
+            dex_link = data.get('link', f"https://dexscreener.com/solana/{DEGEN_ADDR}")
+            
+            # Select a prompt based on the current hour
+            prompt_index = hour_counter % len(grok_prompts)
+            selected_prompt = grok_prompts[prompt_index]
+            
+            # Sometimes include metrics, sometimes don't for variety
+            include_metrics = hour_counter % 3 != 0  # Skip metrics every third hour
+            
+            # Ask Grok for content
+            raw = ask_grok(selected_prompt)
+            
+            # Construct tweet with or without metrics
+            if include_metrics:
+                tweet_content = metrics + raw
+            else:
+                tweet_content = raw
+                
+            # Include the DEXScreener link in the tweet for preview image
+            tweet = truncate_to_sentence(tweet_content, 530) + "\n\n" + dex_link
+            
+            # Add hashtags occasionally for additional variety
+            if hour_counter % 4 == 0:  # Every fourth hour
+                hashtags = choice([
+                    "#DEGEN #SOL #Crypto",
+                    "#DEGENArmy #Solana",
+                    "#ToTheMoon #DEGEN",
+                    "#CryptoTwitter #DEGEN",
+                    "#DEGEN #Web3"
+                ])
+                tweet = truncate_to_sentence(tweet_content, 490) + "\n\n" + hashtags + "\n" + dex_link
+            
             last = redis_client.get(f"{REDIS_PREFIX}last_hourly_post")
             if tweet != last:
-                img = choice(glob.glob("raid_images/*.jpg"))
-                media_id = x_api.media_upload(img).media_id_string
-                await safe_tweet(tweet, media_id=media_id)
+                # Post without attaching a media image since the link will provide the preview
+                await safe_tweet(tweet)
                 redis_client.set(f"{REDIS_PREFIX}last_hourly_post", tweet)
+            
+            # Increment hour counter
+            hour_counter += 1
+            
         except Exception as e:
             logger.error(f"Hourly post error: {e}")
+            
         await asyncio.sleep(3600)
 
 async def main():

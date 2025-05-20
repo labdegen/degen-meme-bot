@@ -308,16 +308,16 @@ async def handle_mention(tw):
             "First, answer naturally and concisely. "
             "Then, in a second gambler-style line, mention stacking $DEGEN. End with NFA. No slang.  High class but a little edgy like Don Draper."
         )
+        raw = ask_grok(prompt)
         
-	raw = ask_grok(prompt)
+        # Ensure we have a complete response that doesn't get cut off
         reply_body = raw.strip()
-
-        # Custom stack reminder, only append once
-        reminder = f"As always, stack more $DEGEN ca:{DEGEN_ADDR}"
-        if reminder not in reply_body:
-            reply = f"{reply_body}\n\n{reminder}"
+        
+        # Make sure the response contains $DEGEN mention and contract address
+        if "$DEGEN" not in reply_body:
+            reply = f"{reply_body}\n\nStack $DEGEN! Contract Address: {DEGEN_ADDR}"
         else:
-            reply = reply_body
+                reply = reply_body
         
         # Ensure we're not exceeding Twitter's character limit
         if len(reply) > 260:
@@ -394,7 +394,7 @@ async def handle_mention(tw):
                 redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
                 return
 
-        # 4) general fallback
+        # 5) general fallback
         prompt = (
             f"History:{history}\n"
             f"User asked: \"{txt}\"\n"
@@ -402,14 +402,20 @@ async def handle_mention(tw):
             "Then, in a second gambler-style line, mention stacking $DEGEN. End with NFA. No slang.  High class but a little edgy like Don Draper."
         )
         raw = ask_grok(prompt)
+        
+        # Ensure we have a complete response that doesn't get cut off
         reply_body = raw.strip()
-
-        # Custom stack reminder, only append once
-        reminder = f"As always, stack more $DEGEN ca:{DEGEN_ADDR}"
-        if reminder not in reply_body:
-            reply = f"{reply_body}\n\n{reminder}"
+        
+        # Make sure the response contains $DEGEN mention and contract address
+        if "$DEGEN" not in reply_body:
+            reply = f"{reply_body}\n\nStack $DEGEN! Contract Address: {DEGEN_ADDR}"
         else:
-            reply = reply_body  
+            # If $DEGEN is already mentioned, just add the contract address if needed
+            if DEGEN_ADDR not in reply_body:
+                reply = f"{reply_body}\n\nContract Address: {DEGEN_ADDR}"
+            else:
+                reply = reply_body
+        
         # Ensure we're not exceeding Twitter's character limit
         if len(reply) > 260:
             reply = truncate_to_sentence(reply, 220) + f"\n\nContract Address: {DEGEN_ADDR}"

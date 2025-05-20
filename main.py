@@ -308,16 +308,15 @@ async def handle_mention(tw):
             "First, answer naturally and concisely. "
             "Then, in a second gambler-style line, mention stacking $DEGEN. End with NFA. No slang.  High class but a little edgy like Don Draper."
         )
-        raw = ask_grok(prompt)
-        
-        # Ensure we have a complete response that doesn't get cut off
+         raw = ask_grok(prompt)
         reply_body = raw.strip()
-        
-    reminder = f"As always, stack more $DEGEN ca:{DEGEN_ADDR}"
-    if reminder not in reply_body:
-        reply = f"{reply_body}\n\n{reminder}"
-    else:
-        reply = reply_body
+
+        # Custom stack reminder, only append once
+        reminder = f"As always, stack more $DEGEN ca:{DEGEN_ADDR}"
+        if reminder not in reply_body:
+            reply = f"{reply_body}\n\n{reminder}"
+        else:
+            reply = reply_body
         
         # Ensure we're not exceeding Twitter's character limit
         if len(reply) > 260:

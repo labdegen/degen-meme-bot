@@ -412,13 +412,13 @@ async def handle_mention(tw):
         else:
             # If $DEGEN is already mentioned, just add the contract address if needed
             if DEGEN_ADDR not in reply_body:
-                reply = f"{reply_body}\n\nContract Address: {DEGEN_ADDR}"
+                reply = f"{reply_body}\n\nAs always keep stacking $DEGEN. ca: {DEGEN_ADDR}"
             else:
                 reply = reply_body
         
         # Ensure we're not exceeding Twitter's character limit
         if len(reply) > 260:
-            reply = truncate_to_sentence(reply, 220) + f"\n\nContract Address: {DEGEN_ADDR}"
+            reply = truncate_to_sentence(reply, 220) + f"\n\nAs always keep stacking $DEGEN. ca: {DEGEN_ADDR}"
         
         img = choice(glob.glob("raid_images/*.jpg"))
         media_id = x_api.media_upload(img).media_id_string

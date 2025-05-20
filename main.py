@@ -16,6 +16,9 @@ import glob
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# List of problematic tweet IDs to always skip
+BLOCKED_TWEET_IDS = ["1924845778821845267"]  # Add the specific tweet ID that's causing issues
+
 # Load environment variables
 load_dotenv()
 required = [
@@ -253,86 +256,92 @@ async def post_raid(tweet):
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
 
 async def handle_mention(tw):
-    convo_id = tw.conversation_id or tw.id
-    if redis_client.hget(get_thread_key(convo_id), "count") is None:
-        try:
-            root = x_client.get_tweet(convo_id, tweet_fields=['text']).data.text
-            update_thread(convo_id, f"ROOT: {root}", "")
-        except:
-            update_thread(convo_id, f"ROOT: Unknown", "")
-    history = get_thread_history(convo_id)
-    txt = re.sub(rf"@{BOT_USERNAME}\b", "", tw.text, flags=re.IGNORECASE).strip()
+    try:
+        convo_id = tw.conversation_id or tw.id
+        if redis_client.hget(get_thread_key(convo_id), "count") is None:
+            try:
+                root = x_client.get_tweet(convo_id, tweet_fields=['text']).data.text
+                update_thread(convo_id, f"ROOT: {root}", "")
+            except Exception as e:
+                logger.warning(f"Failed to get root tweet: {e}")
+                update_thread(convo_id, f"ROOT: Unknown", "")
+        history = get_thread_history(convo_id)
+        txt = re.sub(rf"@{BOT_USERNAME}\b", "", tw.text, flags=re.IGNORECASE).strip()
 
-    # 1) raid
-    if re.search(r"\braid\b", txt, re.IGNORECASE):
-        await post_raid(tw)
-        return
+        # 1) raid
+        if re.search(r"\braid\b", txt, re.IGNORECASE):
+            await post_raid(tw)
+            return
 
-    # 2) Check for DEX or CA commands - Fixed to properly handle these commands
-    if re.search(r"\b(dex|ca|contract|address)\b", txt, re.IGNORECASE):
-        img = choice(glob.glob("raid_images/*.jpg"))
-        media_id = x_api.media_upload(img).media_id_string
-        await safe_tweet(
-            text=build_dex_reply(DEGEN_ADDR),
-            media_id=media_id,
-            in_reply_to_tweet_id=tw.id
-        )
-        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-        return
-
-    # 3) token/address -> DEX preview
-    token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
-    if token:
-        sym = token.lstrip('$').upper()
-        addr = DEGEN_ADDR if sym=="DEGEN" else lookup_address(token)
-        if addr:
+        # 2) Check for DEX or CA commands
+        if re.search(r"\b(dex|ca|contract|address)\b", txt, re.IGNORECASE):
             img = choice(glob.glob("raid_images/*.jpg"))
             media_id = x_api.media_upload(img).media_id_string
             await safe_tweet(
-                text=build_dex_reply(addr),
+                text=build_dex_reply(DEGEN_ADDR),
                 media_id=media_id,
                 in_reply_to_tweet_id=tw.id
             )
             redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
             return
 
-    # 4) general fallback
-    prompt = (
-        f"History:{history}\n"
-        f"User asked: \"{txt}\"\n"
-        "First, answer naturally and concisely. "
-        "Then, in a second gambler-style line, mention stacking $DEGEN. End with NFA."
-    )
-    raw = ask_grok(prompt)
-    
-    # Ensure we have a complete response that doesn't get cut off
-    reply_body = raw.strip()
-    
-    # Make sure the response contains $DEGEN mention and contract address
-    if "$DEGEN" not in reply_body:
-        reply = f"{reply_body}\n\nStack $DEGEN! Contract Address: {DEGEN_ADDR}"
-    else:
-        # If $DEGEN is already mentioned, just add the contract address if needed
-        if DEGEN_ADDR not in reply_body:
-            reply = f"{reply_body}\n\nContract Address: {DEGEN_ADDR}"
+        # 3) token/address -> DEX preview
+        token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
+        if token:
+            sym = token.lstrip('$').upper()
+            addr = DEGEN_ADDR if sym=="DEGEN" else lookup_address(token)
+            if addr:
+                img = choice(glob.glob("raid_images/*.jpg"))
+                media_id = x_api.media_upload(img).media_id_string
+                await safe_tweet(
+                    text=build_dex_reply(addr),
+                    media_id=media_id,
+                    in_reply_to_tweet_id=tw.id
+                )
+                redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+                return
+
+        # 4) general fallback
+        prompt = (
+            f"History:{history}\n"
+            f"User asked: \"{txt}\"\n"
+            "First, answer naturally and concisely. "
+            "Then, in a second gambler-style line, mention stacking $DEGEN. End with NFA."
+        )
+        raw = ask_grok(prompt)
+        
+        # Ensure we have a complete response that doesn't get cut off
+        reply_body = raw.strip()
+        
+        # Make sure the response contains $DEGEN mention and contract address
+        if "$DEGEN" not in reply_body:
+            reply = f"{reply_body}\n\nStack $DEGEN! Contract Address: {DEGEN_ADDR}"
         else:
-            reply = reply_body
-    
-    # Ensure we're not exceeding Twitter's character limit
-    if len(reply) > 260:
-        reply = truncate_to_sentence(reply, 220) + f"\n\nContract Address: {DEGEN_ADDR}"
-    
-    img = choice(glob.glob("raid_images/*.jpg"))
-    media_id = x_api.media_upload(img).media_id_string
-    
-    await safe_tweet(
-        text=reply,
-        media_id=media_id,
-        in_reply_to_tweet_id=tw.id
-    )
-    redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-    update_thread(convo_id, txt, reply)
-    increment_thread(convo_id)
+            # If $DEGEN is already mentioned, just add the contract address if needed
+            if DEGEN_ADDR not in reply_body:
+                reply = f"{reply_body}\n\nContract Address: {DEGEN_ADDR}"
+            else:
+                reply = reply_body
+        
+        # Ensure we're not exceeding Twitter's character limit
+        if len(reply) > 260:
+            reply = truncate_to_sentence(reply, 220) + f"\n\nContract Address: {DEGEN_ADDR}"
+        
+        img = choice(glob.glob("raid_images/*.jpg"))
+        media_id = x_api.media_upload(img).media_id_string
+        
+        await safe_tweet(
+            text=reply,
+            media_id=media_id,
+            in_reply_to_tweet_id=tw.id
+        )
+        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+        update_thread(convo_id, txt, reply)
+        increment_thread(convo_id)
+    except Exception as e:
+        logger.error(f"Error handling mention {tw.id}: {e}", exc_info=True)
+        # Mark the tweet as replied to avoid getting stuck in a loop
+        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
 
 async def mention_loop():
     while True:
@@ -349,65 +358,25 @@ async def mention_loop():
                 params["since_id"] = int(last)
             res = await safe_mention_lookup(x_client.get_users_mentions, **params)
             if res and res.data:
-                newest_id = max(int(tw.id) for tw in res.data) if res.data else 0
-                # Only update newest ID if it's actually newer
-                if newest_id > 0 and (not last or newest_id > int(last)):
-                    redis_client.set(f"{REDIS_PREFIX}last_mention_id", newest_id)
-                
                 for tw in reversed(res.data):
-                    # Skip if we've already processed or are currently processing this tweet
-                    if (redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)) or 
-                        redis_client.sismember(f"{REDIS_PREFIX}processing_ids", str(tw.id))):
-                        continue
-                    
-                    # Specifically handle the problematic tweet ID
-                    if str(tw.id) == "1924845778821845267":
-                        logger.info(f"Skipping known problematic tweet ID: {tw.id}")
+                    # IMMEDIATELY skip any tweet in our blocklist
+                    if str(tw.id) in BLOCKED_TWEET_IDS:
+                        logger.info(f"Skipping blocked tweet ID: {tw.id}")
                         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
                         continue
-                    
+                        
+                    if redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
+                        continue
+                    redis_client.set(f"{REDIS_PREFIX}last_mention_id", tw.id)
                     try:
-                        # Process with timeout
-                        await asyncio.wait_for(handle_mention(tw), timeout=60)
-                    except asyncio.TimeoutError:
-                        logger.error(f"Handling tweet {tw.id} timed out after 60 seconds")
-                        # Mark as replied to avoid getting stuck
-                        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-                        redis_client.srem(f"{REDIS_PREFIX}processing_ids", str(tw.id))
+                        await handle_mention(tw)
                     except Exception as e:
-                        logger.error(f"Error processing tweet {tw.id}: {e}", exc_info=True)
+                        logger.error(f"Error handling mention {tw.id}: {e}", exc_info=True)
                         # Mark as replied to avoid getting stuck
                         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-                        redis_client.srem(f"{REDIS_PREFIX}processing_ids", str(tw.id))
         except Exception as e:
-            logger.error(f"Mention loop error: {e}", exc_info=True)
+            logger.error(f"Mention loop error: {e}")
         await asyncio.sleep(110)
-
-async def cleanup_stuck_tweets():
-    """
-    Run this function at startup to clear any tweets that might be stuck in processing
-    """
-    try:
-        # Clear any processing IDs that might be left from previous runs
-        keys = redis_client.keys(f"{REDIS_PREFIX}processing_ids")
-        if keys:
-            redis_client.delete(*keys)
-            logger.info("Cleaned up processing IDs from previous runs")
-        
-        # Mark the problematic tweet as replied
-        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", "1924845778821845267")
-        logger.info("Marked problematic tweet as replied")
-    except Exception as e:
-        logger.error(f"Error during cleanup: {e}", exc_info=True)
-
-# Modified main function to include cleanup at startup
-async def main():
-    # Clean up any stuck processing state when starting
-    await cleanup_stuck_tweets()
-    
-    # Start the main loops
-    await asyncio.gather(mention_loop(), search_mentions_loop(), hourly_post_loop())
-
 
 async def search_mentions_loop():
     """
@@ -445,16 +414,26 @@ async def search_mentions_loop():
                 newest_id = max(int(tw.id) for tw in search_results.data) if search_results.data else 0
                 
                 for tw in search_results.data:
+                    # IMMEDIATELY skip any tweet in our blocklist
+                    if str(tw.id) in BLOCKED_TWEET_IDS:
+                        logger.info(f"Skipping blocked tweet ID: {tw.id}")
+                        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+                        continue
+                        
                     # Skip if we've already processed this tweet
                     if redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
                         continue
                     
-                    # Get the full tweet text from tw
-                    logger.info(f"Processing community mention: {tw.id} - {tw.text[:30]}...")
-                    
-                    # Process the mention
-                    await handle_mention(tw)
-                    redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+                    try:
+                        # Get the full tweet text from tw
+                        logger.info(f"Processing community mention: {tw.id} - {tw.text[:30]}...")
+                        
+                        # Process the mention
+                        await handle_mention(tw)
+                    except Exception as e:
+                        logger.error(f"Error processing mention {tw.id}: {e}", exc_info=True)
+                        # Mark as replied to avoid getting stuck in a loop
+                        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
                 
                 # Update the last search ID
                 if newest_id > 0:
@@ -485,6 +464,11 @@ async def hourly_post_loop():
         await asyncio.sleep(3600)
 
 async def main():
+    # Pre-mark all blocked tweets as replied to
+    for tweet_id in BLOCKED_TWEET_IDS:
+        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tweet_id)
+        logger.info(f"Pre-marked blocked tweet ID {tweet_id} as replied")
+    
     await asyncio.gather(mention_loop(), search_mentions_loop(), hourly_post_loop())
 
 if __name__ == "__main__":

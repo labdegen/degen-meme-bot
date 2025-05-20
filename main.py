@@ -11,7 +11,6 @@ from collections import deque
 from random import choice
 from dotenv import load_dotenv
 import tweepy
-import openai
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -31,8 +30,11 @@ for var in required_env_vars:
     if not os.getenv(var):
         raise RuntimeError(f"Missing env var: {var}")
 
-# OpenAI (GPT-4o) setup for fallback
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# HTTP URLs
+grok_url = "https://api.x.ai/v1/chat/completions"
+openai_url = "https://api.openai.com/v1/chat/completions"
+
+def _now(): return time.time()
 
 # Twitter API setup
 oauth = tweepy.OAuth1UserHandler(
@@ -68,7 +70,6 @@ logger.info("Redis connected")
 # Constants
 REDIS_PREFIX = "degen:"
 DEGEN_ADDR = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
-GROK_URL = "https://api.x.ai/v1/chat/completions"
 DEXS_SEARCH_URL = "https://api.dexscreener.com/api/search?query="
 DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
 
@@ -98,12 +99,8 @@ def truncate_to_sentence(text: str, max_length: int) -> str:
 
 # Thread memory
 
-def get_thread_key(cid):
-    return f"{REDIS_PREFIX}thread:{cid}"
-
-def get_thread_history(cid):
-    return redis_client.hget(get_thread_key(cid), "history") or ""
-
+def get_thread_key(cid): return f"{REDIS_PREFIX}thread:{cid}"
+def get_thread_history(cid): return redis_client.hget(get_thread_key(cid), "history") or ""
 def increment_thread(cid):
     redis_client.hincrby(get_thread_key(cid), "count", 1)
     redis_client.expire(get_thread_key(cid), 86400)
@@ -139,7 +136,7 @@ def _ask_grok_sync(prompt: str) -> str:
     }
     for attempt in range(3):
         try:
-            r = requests.post(GROK_URL, json=payload, headers=headers, timeout=10)
+            r = requests.post(grok_url, json=payload, headers=headers, timeout=10)
             r.raise_for_status()
             return r.json()['choices'][0]['message']['content'].strip()
         except requests.exceptions.HTTPError as e:
@@ -156,30 +153,36 @@ def _ask_grok_sync(prompt: str) -> str:
             break
     return "Unable to provide an update at this time."
 
-# Async wrapper with GPT-4o fallback
+# Async wrapper with HTTP fallback to OpenAI
 async def ask_grok(prompt: str) -> str:
-    # Run Grok call off the event loop
-    grok_response = await asyncio.to_thread(_ask_grok_sync, prompt)
-    if not grok_response.startswith("Unable"):
-        return grok_response
-    # Fallback to OpenAI GPT-4o
+    # run Grok off loop
+    grok_resp = await asyncio.to_thread(_ask_grok_sync, prompt)
+    if not grok_resp.startswith("Unable"):
+        return grok_resp
+    # fallback to OpenAI
+    payload = {
+        "model": "gpt-4o-latest",
+        "messages": [
+            {"role": "system",  "content": SYSTEM_PROMPT},
+            {"role": "user",    "content": prompt}
+        ],
+        "max_tokens": 180,
+        "temperature": 0.8
+    }
+    headers = {
+        "Authorization": f"Bearer {os.getenv('OPENAI_API_KEY')}",
+        "Content-Type": "application/json"
+    }
     try:
-        resp = await openai.ChatCompletion.acreate(
-            model="gpt-4o-latest",
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": prompt}
-            ],
-            max_tokens=180,
-            temperature=0.8
-        )
-        return resp.choices[0].message.content.strip()
+        r = await asyncio.to_thread(requests.post, openai_url, json=payload, headers=headers, timeout=10)
+        r.raise_for_status()
+        return r.json()['choices'][0]['message']['content'].strip()
     except Exception as e:
         logger.warning(f"OpenAI fallback error: {e}")
         return "Unable to provide an update at this time."
 
 # Async rate-limited wrapper
-def _now(): return time.time()
+def _record(tq): tq.append(_now())
 async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
     now = _now()
     while timestamps_queue and now - timestamps_queue[0] > RATE_WINDOW:
@@ -193,17 +196,13 @@ async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
         await asyncio.sleep(reset - time.time() + 1)
         return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
     finally:
-        timestamps_queue.append(_now())
+        _record(timestamps_queue)
 
-async def safe_mention_lookup(fn, *args, **kwargs):
-    return await safe_api_call(fn, mentions_timestamps, MENTIONS_LIMIT, *args, **kwargs)
-
-async def safe_search(fn, *args, **kwargs):
-    return await safe_api_call(fn, search_timestamps, SEARCH_LIMIT, *args, **kwargs)
-
+async def safe_mention_lookup(fn, *args, **kwargs): return await safe_api_call(fn, mentions_timestamps, MENTIONS_LIMIT, *args, **kwargs)
+async def safe_search(fn, *args, **kwargs):         return await safe_api_call(fn, search_timestamps, SEARCH_LIMIT, *args, **kwargs)
 async def safe_tweet(text: str, media_id=None, **kwargs):
     return await safe_api_call(
-        lambda t, m, **kw: x_client.create_tweet(text=t, media_ids=[m] if m else None, **kw),
+        lambda t,m,**kw: x_client.create_tweet(text=t, media_ids=[m] if m else None, **kw),
         tweet_timestamps,
         TWEETS_LIMIT,
         text,
@@ -400,12 +399,11 @@ async def hourly_post_loop():
             logger.error(f"Hourly post error: {e}")
         await asyncio.sleep(3600)
 
-async def main():
-    await asyncio.gather(
-        mention_loop(),
-        search_mentions_loop(),
-        hourly_post_loop()
-    )
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(
+        asyncio.gather(
+            mention_loop(),
+            search_mentions_loop(),
+            hourly_post_loop()
+        )
+    )

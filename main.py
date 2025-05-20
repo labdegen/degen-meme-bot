@@ -583,7 +583,7 @@ async def main():
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tweet_id)
         logger.info(f"Pre-marked blocked tweet ID {tweet_id} as replied")
     
-    await asyncio.gather(mention_loop(), search_mentions_loop(), hourly_post_loop())
+    await asyncio.gather(search_mentions_loop(), hourly_post_loop())
 
 if __name__ == "__main__":
     asyncio.run(main())

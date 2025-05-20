@@ -159,7 +159,7 @@ def _ask_grok_sync(prompt: str) -> str:
 # Async wrapper with GPT-4o fallback
 async def ask_grok(prompt: str) -> str:
     # Run Grok call off the event loop
-grok_response = await asyncio.to_thread(_ask_grok_sync, prompt)
+    grok_response = await asyncio.to_thread(_ask_grok_sync, prompt)
     if not grok_response.startswith("Unable"):
         return grok_response
     # Fallback to OpenAI GPT-4o

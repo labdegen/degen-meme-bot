@@ -161,7 +161,7 @@ async def ask_grok(prompt: str) -> str:
         return grok_resp
     # fallback to OpenAI
     payload = {
-        "model": "gpt-4o-latest",
+        "model": "chatgpt-4o-latest",
         "messages": [
             {"role": "system",  "content": SYSTEM_PROMPT},
             {"role": "user",    "content": prompt}

@@ -315,7 +315,7 @@ async def handle_mention(tw):
         
         # Make sure the response contains $DEGEN mention and contract address
         if "$DEGEN" not in reply_body:
-            reply = f"{reply_body}\n\nStack $DEGEN! Contract Address: {DEGEN_ADDR}"
+            reply = f"{reply_body}\n\nStack $DEGEN! As always, keep stacking $DEGEN : {DEGEN_ADDR}"
         else:
                 reply = reply_body
         

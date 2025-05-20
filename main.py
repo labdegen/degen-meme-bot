@@ -522,7 +522,7 @@ async def hourly_post_loop():
         "Write a line about diamond hands and $DEGEN's future potential. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper."
     ]
     
-     hour_counter = 0
+    hour_counter = 0
 
     while True:
         try:

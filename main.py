@@ -320,7 +320,7 @@ async def handle_mention(tw):
                 reply = reply_body
         
         # Ensure we're not exceeding Twitter's character limit
-        if len(reply) > 260:
+        if len(reply) > 360:
             reply = truncate_to_sentence(reply, 220) + f"\n\nStack $DEGEN. ca: {DEGEN_ADDR}"
         
         img = choice(glob.glob("raid_images/*.jpg"))
@@ -509,13 +509,10 @@ async def hourly_post_loop():
         "Write a positive one-sentence analytical update on $DEGEN using data from the last hour. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper.",
         "Write a positive one-sentence hot take on $DEGEN's price action. Be edgy and risky. Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
         
-        "Write a one-sentence FOMO-inducing statement about $DEGEN. Make people feel they're missing out. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper.",
-        
-        "Write a one sentence, cryptic message about $DEGEN that implies insider knowledge. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper.",
-        "Wite a one-sentence 'this is financial advice' joke about $DEGEN (while clarifying it's not).Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
-        "Write a one sentence, savage comment about people who haven't bought $DEGEN yet. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper.",
-        "Write a one sentence comparing $DEGEN to the broader crypto market.Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
-        "Write a one sentence post about diamond hands and $DEGEN's future potential. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper."
+        "Write a one sentence, cryptic message about $DEGEN that implies insider knowledge. Do not mention the contract address. No slang.  High class but a little edgy like David Foster Wallace.",
+        "Write a one sentence, savage comment about people who haven't bought $DEGEN yet. Do not mention the contract address. No slang.  High class but a little edgy like Elon Musk.",
+        "Write a one sentence comparing $DEGEN to the broader crypto market.Do not mention the contract address.  No slang.  High class but a little edgy like Hemmingway.",
+        "Write a one sentence post about diamond hands and $DEGEN's future potential. Do not mention the contract address. No slang.  High class but a little edgy like Hunter Thompson."
     ]
     
     hour_counter = 0

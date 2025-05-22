@@ -306,7 +306,7 @@ async def handle_mention(tw):
             f"History:{history}\n"
             f"User asked: \"{txt}\"\n"
             "First, answer naturally and concisely. "
-            "Then, in a second gambler-style line, mention stacking $DEGEN. End with NFA. No slang.  High class but a little edgy like Don Draper."
+
         )
         raw = ask_grok(prompt)
         
@@ -399,7 +399,7 @@ async def handle_mention(tw):
             f"History:{history}\n"
             f"User asked: \"{txt}\"\n"
             "First, answer naturally and concisely. "
-            "Then, in a second gambler-style line, mention stacking $DEGEN. End with NFA. No slang.  High class but a little edgy like Don Draper."
+       
         )
         raw = ask_grok(prompt)
         
@@ -412,7 +412,7 @@ async def handle_mention(tw):
         else:
             # If $DEGEN is already mentioned, just add the contract address if needed
             if DEGEN_ADDR not in reply_body:
-                reply = f"{reply_body}\n\n$DEGEN. ca: {DEGEN_ADDR}"
+                reply = f"{reply_body}\n\nStack $DEGEN. ca: {DEGEN_ADDR}"
             else:
                 reply = reply_body
         

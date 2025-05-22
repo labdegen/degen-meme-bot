@@ -315,13 +315,13 @@ async def handle_mention(tw):
         
         # Make sure the response contains $DEGEN mention and contract address
         if "$DEGEN" not in reply_body:
-            reply = f"{reply_body}\n\nStack $DEGEN! As always, keep stacking $DEGEN : {DEGEN_ADDR}"
+            reply = f"{reply_body}\n\nStack $DEGEN! : {DEGEN_ADDR}"
         else:
                 reply = reply_body
         
         # Ensure we're not exceeding Twitter's character limit
         if len(reply) > 260:
-            reply = truncate_to_sentence(reply, 220) + f"\n\nAs always keep stacking $DEGEN. ca: {DEGEN_ADDR}"
+            reply = truncate_to_sentence(reply, 220) + f"\n\nStack $DEGEN. ca: {DEGEN_ADDR}"
         
         img = choice(glob.glob("raid_images/*.jpg"))
         media_id = x_api.media_upload(img).media_id_string
@@ -412,13 +412,13 @@ async def handle_mention(tw):
         else:
             # If $DEGEN is already mentioned, just add the contract address if needed
             if DEGEN_ADDR not in reply_body:
-                reply = f"{reply_body}\n\nAs always keep stacking $DEGEN. ca: {DEGEN_ADDR}"
+                reply = f"{reply_body}\n\n$DEGEN. ca: {DEGEN_ADDR}"
             else:
                 reply = reply_body
         
         # Ensure we're not exceeding Twitter's character limit
         if len(reply) > 260:
-            reply = truncate_to_sentence(reply, 220) + f"\n\nAs always keep stacking $DEGEN. ca: {DEGEN_ADDR}"
+            reply = truncate_to_sentence(reply, 220) + f"\n\n$DEGEN. ca: {DEGEN_ADDR}"
         
         img = choice(glob.glob("raid_images/*.jpg"))
         media_id = x_api.media_upload(img).media_id_string
@@ -507,15 +507,15 @@ async def hourly_post_loop():
     # Create a list of varied prompts for Grok to generate different types of content
     grok_prompts = [
         "Write a positive one-sentence analytical update on $DEGEN using data from the last hour. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper.",
-        "Write a degenerate gambler's hot take on $DEGEN's price action. Be edgy and risky. Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
-        "Create a short, bold prediction about $DEGEN's upcoming performance. Make it exciting. Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
-        "Write a brief FOMO-inducing statement about $DEGEN. Make people feel they're missing out. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper.",
-        "Create a humorous one-liner about $DEGEN's current market position.Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
-        "Write a short, cryptic message about $DEGEN that implies insider knowledge. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper.",
-        "Create a 'this is financial advice' joke about $DEGEN (while clarifying it's not).Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
-        "Write a short, savage comment about people who haven't bought $DEGEN yet. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper.",
-        "Create a brief statement comparing $DEGEN to the broader crypto market.Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
-        "Write a line about diamond hands and $DEGEN's future potential. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper."
+        "Write a positive one-sentence hot take on $DEGEN's price action. Be edgy and risky. Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
+        
+        "Write a one-sentence FOMO-inducing statement about $DEGEN. Make people feel they're missing out. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper.",
+        
+        "Write a one sentence, cryptic message about $DEGEN that implies insider knowledge. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper.",
+        "Wite a one-sentence 'this is financial advice' joke about $DEGEN (while clarifying it's not).Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
+        "Write a one sentence, savage comment about people who haven't bought $DEGEN yet. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper.",
+        "Write a one sentence comparing $DEGEN to the broader crypto market.Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
+        "Write a one sentence post about diamond hands and $DEGEN's future potential. Do not mention the contract address. No slang.  High class but a little edgy like Don Draper."
     ]
     
     hour_counter = 0

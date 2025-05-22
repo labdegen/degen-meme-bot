@@ -321,7 +321,7 @@ async def handle_mention(tw):
         
         # Ensure we're not exceeding Twitter's character limit
         if len(reply) > 360:
-            reply = truncate_to_sentence(reply, 220) + f"\n\nStack $DEGEN. ca: {DEGEN_ADDR}"
+            reply = truncate_to_sentence(reply, 360) + f"\n\nStack $DEGEN. ca: {DEGEN_ADDR}"
         
         img = choice(glob.glob("raid_images/*.jpg"))
         media_id = x_api.media_upload(img).media_id_string
@@ -417,8 +417,8 @@ async def handle_mention(tw):
                 reply = reply_body
         
         # Ensure we're not exceeding Twitter's character limit
-        if len(reply) > 260:
-            reply = truncate_to_sentence(reply, 220) + f"\n\n$DEGEN. ca: {DEGEN_ADDR}"
+        if len(reply) > 360:
+            reply = truncate_to_sentence(reply, 360) + f"\n\n$DEGEN. ca: {DEGEN_ADDR}"
         
         img = choice(glob.glob("raid_images/*.jpg"))
         media_id = x_api.media_upload(img).media_id_string

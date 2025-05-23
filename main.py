@@ -11,6 +11,7 @@ import time
 from collections import deque
 from random import choice
 import glob
+import http.client
 
 like_timestamps = deque()
 LIKE_LIMIT = 50  # or choose an appropriate per-15-min limit

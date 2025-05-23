@@ -12,6 +12,9 @@ from collections import deque
 from random import choice
 import glob
 
+like_timestamps = deque()
+LIKE_LIMIT = 50  # or choose an appropriate per-15-min limit
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -180,6 +183,14 @@ async def safe_tweet(text: str, media_id=None, **kwargs):
         **kwargs
     )
 
+async def safe_like(tweet_id: str):
+    return await safe_api_call(
+        lambda tid: x_api.create_favorite(id=tid),
+        like_timestamps,
+        LIKE_LIMIT,
+        tweet_id
+    )
+
 # DEX helpers
 def fetch_data(addr: str) -> dict:
     try:
@@ -254,6 +265,64 @@ async def post_raid(tweet):
         logger.error(f"Error in post_raid for tweet {tweet.id}: {e}", exc_info=True)
         # Mark as replied to avoid getting stuck
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
+
+async def search_degen_loop():
+    # initialize last seen ID
+    key = f"{REDIS_PREFIX}last_degen_id"
+    if not redis_client.exists(key):
+        redis_client.set(key, INITIAL_SEARCH_ID)
+
+    while True:
+        try:
+            last_id = redis_client.get(key)
+            params = {
+                "query": "degen -is:retweet",
+                "since_id": last_id,
+                "tweet_fields": ["id", "text", "conversation_id", "created_at"],
+                "max_results": 10
+            }
+            res = await safe_search(x_client.search_recent_tweets, **params)
+            if res and res.data:
+                newest = max(int(t.id) for t in res.data)
+                for tw in res.data:
+                    tid = str(tw.id)
+                    if tid in BLOCKED_TWEET_IDS or redis_client.sismember(f"{REDIS_PREFIX}replied_ids", tid):
+                        continue
+                    await post_raid(tw)
+                    # mark it so we don’t double-reply
+                    redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tid)
+                redis_client.set(key, str(newest))
+        except Exception as e:
+            logger.error(f"search_degen_loop error: {e}", exc_info=True)
+        await asyncio.sleep(180)  # every 3 minutes
+
+async def auto_like_degen_loop():
+    key = f"{REDIS_PREFIX}last_like_id"
+    if not redis_client.exists(key):
+        redis_client.set(key, INITIAL_SEARCH_ID)
+
+    while True:
+        try:
+            last_id = redis_client.get(key)
+            params = {
+                "query": "$DEGEN -is:retweet",
+                "since_id": last_id,
+                "tweet_fields": ["id", "text"],
+                "max_results": 10
+            }
+            res = await safe_search(x_client.search_recent_tweets, **params)
+            if res and res.data:
+                newest = max(int(t.id) for t in res.data)
+                for tw in res.data:
+                    tid = str(tw.id)
+                    if not redis_client.sismember(f"{REDIS_PREFIX}liked_ids", tid):
+                        await safe_like(tid)
+                        redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
+                redis_client.set(key, str(newest))
+        except Exception as e:
+            logger.error(f"auto_like_degen_loop error: {e}", exc_info=True)
+        await asyncio.sleep(300)  # every 5 minutes
+
 
 async def handle_mention(tw):
     try:
@@ -554,7 +623,7 @@ async def main():
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tweet_id)
         logger.info(f"Pre-marked blocked tweet ID {tweet_id} as replied")
     
-    await asyncio.gather(search_mentions_loop(), hourly_post_loop())
+    await asyncio.gather(search_mentions_loop(),hourly_post_loop(),search_degen_loop(),auto_like_degen_loop())
 
 if __name__ == "__main__":
     asyncio.run(main())

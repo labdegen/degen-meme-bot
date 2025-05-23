@@ -305,7 +305,7 @@ async def auto_like_degen_loop():
         try:
             last_id = redis_client.get(key)
             params = {
-                "query": "$DEGEN -is:retweet",
+                "query": "DEGEN -is:retweet",
                 "since_id": last_id,
                 "tweet_fields": ["id", "text"],
                 "max_results": 10
@@ -315,7 +315,7 @@ async def auto_like_degen_loop():
                 newest = max(int(t.id) for t in res.data)
                 for tw in res.data:
                     tid = str(tw.id)
-                    if not redis_client.sismember(f"{REDIS_PREFIX}liked_ids", tid):
+                    if "$DEGEN" in tw.text.upper() and not redis_client.sismember(f"{REDIS_PREFIX}liked_ids", tid):
                         await safe_like(tid)
                         redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
                 redis_client.set(key, str(newest))

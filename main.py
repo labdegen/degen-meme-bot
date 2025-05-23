@@ -154,7 +154,7 @@ async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
         await asyncio.sleep(RATE_WINDOW - (now - timestamps_queue[0]) + 1)
     try:
         return fn(*args, **kwargs)
-        except (requests.exceptions.ConnectionError, http.client.RemoteDisconnected) as e:
+    except (requests.exceptions.ConnectionError, http.client.RemoteDisconnected) as e:
             logger.warning(f"Network error during API call: {e}. Retrying in 5s…")
             await asyncio.sleep(5)
             return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)

@@ -309,6 +309,7 @@ DEGEN_ADDR = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
 GROK_URL = "https://api.x.ai/v1/chat/completions"
 DEXS_SEARCH_URL = "https://api.dexscreener.com/api/search?query="
 DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 
 ADDR_RE = re.compile(r"\b[A-Za-z0-9]{43,44}\b")
 SYMBOL_RE = re.compile(r"\$([A-Za-z0-9]{2,10})", re.IGNORECASE)
@@ -669,89 +670,6 @@ async def auto_like_degen_loop():
         
         await asyncio.sleep(360)  # Every 6 minutes (reduced frequency for likes)
 
-async def handle_mention(tw):
-    try:
-        convo_id = tw.conversation_id or tw.id
-        if redis_client.hget(get_thread_key(convo_id), "count") is None:
-            try:
-                root = x_client.get_tweet(convo_id, tweet_fields=['text']).data.text
-                update_thread(convo_id, f"ROOT: {root}", "")
-            except Exception as e:
-                logger.warning(f"Failed to get root tweet: {e}")
-                update_thread(convo_id, f"ROOT: Unknown", "")
-        history = get_thread_history(convo_id)
-        txt = re.sub(rf"@{BOT_USERNAME}\b", "", tw.text, flags=re.IGNORECASE).strip()
-
-        # 1) raid
-        if re.search(r"\braid\b", txt, re.IGNORECASE):
-            await post_raid(tw)
-            return
-
-        # 2) Check for DEX or CA commands
-        if re.search(r"\b(dex|ca|contract|address)\b", txt, re.IGNORECASE):
-            img = choice(glob.glob("raid_images/*.jpg"))
-            media_id = x_api.media_upload(img).media_id_string
-            await safe_tweet(
-                text=build_dex_reply(DEGEN_ADDR),
-                media_id=media_id,
-                in_reply_to_tweet_id=tw.id
-            )
-            redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-            return
-
-        # 3) token/address -> DEX preview
-        token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
-        if token:
-            sym = token.lstrip('$').upper()
-            addr = DEGEN_ADDR if sym=="DEGEN" else lookup_address(token)
-            if addr:
-                img = choice(glob.glob("raid_images/*.jpg"))
-                media_id = x_api.media_upload(img).media_id_string
-                await safe_tweet(
-                    text=build_dex_reply(addr),
-                    media_id=media_id,
-                    in_reply_to_tweet_id=tw.id
-                )
-                redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-                return
-
-        # 4) general fallback
-        prompt = (
-            f"History:{history}\n"
-            f"User asked: \"{txt}\"\n"
-            "First, answer naturally and concisely. "
-
-        )
-        raw = ask_grok(prompt)
-        
-        # Ensure we have a complete response that doesn't get cut off
-        reply_body = raw.strip()
-        
-        # Make sure the response contains $DEGEN mention and contract address
-        if "$DEGEN" not in reply_body:
-            reply = f"{reply_body}\n\nStack $DEGEN! : {DEGEN_ADDR}"
-        else:
-                reply = reply_body
-        
-        # Ensure we're not exceeding Twitter's character limit
-        if len(reply) > 360:
-            reply = truncate_to_sentence(reply, 360) + f"\n\nStack $DEGEN. ca: {DEGEN_ADDR}"
-        
-        img = choice(glob.glob("raid_images/*.jpg"))
-        media_id = x_api.media_upload(img).media_id_string
-        
-        await safe_tweet(
-            text=reply,
-            media_id=media_id,
-            in_reply_to_tweet_id=tw.id
-        )
-        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-        update_thread(convo_id, txt, reply)
-        increment_thread(convo_id)
-    except Exception as e:
-        logger.error(f"Error handling mention {tw.id}: {e}", exc_info=True)
-        # Mark the tweet as replied to avoid getting stuck in a loop
-        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
 
 async def handle_mention(tw):
     try:

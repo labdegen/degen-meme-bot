@@ -12,251 +12,17 @@ from collections import deque
 from random import choice
 import glob
 import http.client
-# Add these imports to your existing imports
-import websocket
-import json
-import threading
-from concurrent.futures import ThreadPoolExecutor
-
-# Add this after your existing constants
-MINIMUM_BUY_SOL = 1.0  # Minimum SOL amount to trigger buy tweet
-RAYDIUM_PROGRAM = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"  # Raydium AMM program
-JUPITER_PROGRAM = "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4"   # Jupiter aggregator
-PUMP_FUN_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"   # Pump.fun program
-
-# WebSocket connection management
-websocket_client = None
-executor = ThreadPoolExecutor(max_workers=2)
-
-def start_websocket_monitoring():
-    """Start WebSocket monitoring in a separate thread"""
-    def run_websocket():
-        connect_websocket()
-    
-    # Run WebSocket in thread pool to avoid blocking
-    executor.submit(run_websocket)
-    logger.info("WebSocket monitoring started in background thread")
-
-def connect_websocket():
-    """Connect to Helius WebSocket with auto-reconnection"""
-    global websocket_client
-    
-    def on_message(ws, message):
-        try:
-            data = json.loads(message)
-            if 'result' in data and data['result']:
-                # Process transaction in async context
-                asyncio.run_coroutine_threadsafe(
-                    process_transaction(data['result']), 
-                    asyncio.get_event_loop()
-                )
-        except Exception as e:
-            logger.error(f"WebSocket message processing error: {e}")
-
-    def on_error(ws, error):
-        logger.error(f"WebSocket error: {error}")
-
-    def on_close(ws, close_status_code, close_msg):
-        logger.warning("WebSocket connection closed. Reconnecting in 5 seconds...")
-        time.sleep(5)
-        connect_websocket()  # Auto-reconnect
-
-    def on_open(ws):
-        # Subscribe to transactions involving DEGEN token
-        subscribe_msg = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "transactionSubscribe",
-            "params": [
-                {
-                    "failed": False,
-                    "accountInclude": [DEGEN_ADDR],
-                    "vote": False
-                }
-            ]
-        }
-        ws.send(json.dumps(subscribe_msg))
-        logger.info("🚀 Connected to Helius WebSocket - monitoring DEGEN buys!")
-
-    try:
-        websocket_url = f"wss://atlas-mainnet.helius-rpc.com?api-key={HELIUS_API_KEY}"
-        websocket_client = websocket.WebSocketApp(
-            websocket_url,
-            on_open=on_open,
-            on_message=on_message,
-            on_error=on_error,
-            on_close=on_close
-        )
-        websocket_client.run_forever(ping_interval=30, ping_timeout=10)
-    except Exception as e:
-        logger.error(f"WebSocket connection failed: {e}")
-        time.sleep(10)
-        connect_websocket()  # Retry connection
-
-async def process_transaction(transaction_data):
-    """Process incoming transaction to detect DEGEN buys"""
-    try:
-        # Extract basic transaction info
-        signature = transaction_data.get('signature', '')
-        meta = transaction_data.get('meta', {})
-        
-        # Skip if transaction failed
-        if meta.get('err'):
-            return
-            
-        # Skip if already processed
-        if redis_client.sismember(f"{REDIS_PREFIX}processed_buys", signature):
-            return
-            
-        # Get account keys and instructions
-        message = transaction_data.get('message', {})
-        account_keys = message.get('accountKeys', [])
-        instructions = message.get('instructions', [])
-        
-        # Look for DEX program interactions
-        dex_programs = [RAYDIUM_PROGRAM, JUPITER_PROGRAM, PUMP_FUN_PROGRAM]
-        has_dex_interaction = False
-        
-        for instruction in instructions:
-            program_idx = instruction.get('programIdIndex', -1)
-            if program_idx < len(account_keys):
-                program_id = account_keys[program_idx]
-                if program_id in dex_programs:
-                    has_dex_interaction = True
-                    break
-        
-        if not has_dex_interaction:
-            return
-            
-        # Analyze balance changes to detect SOL spent on DEGEN
-        sol_spent, degen_received = analyze_balance_changes(meta, account_keys)
-        
-        if sol_spent >= MINIMUM_BUY_SOL and degen_received > 0:
-            await post_buy_alert(sol_spent, degen_received, signature)
-            redis_client.sadd(f"{REDIS_PREFIX}processed_buys", signature)
-            logger.info(f"🎯 Posted buy alert: {sol_spent:.2f} SOL -> {degen_received:,.0f} DEGEN")
-            
-    except Exception as e:
-        logger.error(f"Transaction processing error: {e}")
-
-def analyze_balance_changes(meta, account_keys):
-    """Analyze transaction to detect SOL -> DEGEN swaps"""
-    try:
-        pre_balances = meta.get('preBalances', [])
-        post_balances = meta.get('postBalances', [])
-        pre_token_balances = meta.get('preTokenBalances', [])
-        post_token_balances = meta.get('postTokenBalances', [])
-        
-        # Track SOL balance changes (in lamports)
-        sol_spent = 0
-        for i, (pre, post) in enumerate(zip(pre_balances, post_balances)):
-            if pre > post:  # SOL was spent
-                sol_change = (pre - post) / 1e9  # Convert lamports to SOL
-                # Only count significant SOL changes (ignore fees)
-                if sol_change > 0.01:  # More than 0.01 SOL
-                    sol_spent += sol_change
-        
-        # Track DEGEN token balance changes
-        degen_received = 0
-        
-        # Create maps for easier lookup
-        pre_token_map = {}
-        for token_balance in pre_token_balances:
-            account_idx = token_balance.get('accountIndex', -1)
-            mint = token_balance.get('mint', '')
-            amount = float(token_balance.get('uiTokenAmount', {}).get('uiAmount', 0))
-            if mint == DEGEN_ADDR:
-                pre_token_map[account_idx] = amount
-        
-        post_token_map = {}
-        for token_balance in post_token_balances:
-            account_idx = token_balance.get('accountIndex', -1)
-            mint = token_balance.get('mint', '')
-            amount = float(token_balance.get('uiTokenAmount', {}).get('uiAmount', 0))
-            if mint == DEGEN_ADDR:
-                post_token_map[account_idx] = amount
-        
-        # Calculate DEGEN received
-        for account_idx in post_token_map:
-            pre_amount = pre_token_map.get(account_idx, 0)
-            post_amount = post_token_map[account_idx]
-            if post_amount > pre_amount:
-                degen_received += (post_amount - pre_amount)
-        
-        return sol_spent, degen_received
-        
-    except Exception as e:
-        logger.error(f"Balance analysis error: {e}")
-        return 0, 0
-
-async def post_buy_alert(sol_amount, degen_amount, signature):
-    """Post tweet about detected DEGEN buy"""
-    try:
-        # Check cooldown to avoid spam
-        cooldown_key = f"{REDIS_PREFIX}buy_alert_cooldown"
-        if redis_client.exists(cooldown_key):
-            return
-            
-        usd_value = sol_amount * 140  # Approximate SOL price
-        
-        # Create engaging buy alert tweets
-        buy_alerts = [
-            f"🚨 FRESH BUY! {sol_amount:.1f} SOL just bought {degen_amount:,.0f} $DEGEN (~${usd_value:,.0f})! Someone's loading the bag! 💎",
-            f"🐋 WHALE ALERT! {sol_amount:.1f} SOL → {degen_amount:,.0f} $DEGEN! That's ${usd_value:,.0f} of pure conviction! 🚀",
-            f"💰 BIG MOVES! {sol_amount:.1f} SOL just converted to {degen_amount:,.0f} $DEGEN! Smart money is stacking! 👀",
-            f"🔥 BUYING PRESSURE! {sol_amount:.1f} SOL worth of $DEGEN just hit the chain! Don't sleep on this! 💯",
-            f"📈 ACCUMULATION MODE! {sol_amount:.1f} SOL → {degen_amount:,.0f} $DEGEN! Someone knows something... 🧠"
-        ]
-        
-        tweet_text = choice(buy_alerts)
-        
-        # Add transaction link
-        tx_link = f"https://solscan.io/tx/{signature}"
-        tweet_text += f"\n\n📊 Tx: {tx_link}"
-        
-        # Add dexscreener link
-        tweet_text += f"\n📈 Chart: https://dexscreener.com/solana/{DEGEN_ADDR}"
-        
-        # Ensure we don't exceed character limit
-        if len(tweet_text) > 280:
-            tweet_text = tweet_text[:250] + f"...\n\n📊 Tx: {tx_link}"
-        
-        # Choose random meme image
-        meme_files = glob.glob("raid_images/*.jpg")
-        if meme_files:
-            img = choice(meme_files)
-            media_id = x_api.media_upload(img).media_id_string
-        else:
-            media_id = None
-        
-        # Post the tweet
-        await safe_tweet(
-            text=tweet_text,
-            media_id=media_id
-        )
-        
-        # Set cooldown (3 minutes to avoid spam)
-        redis_client.setex(cooldown_key, 180, "1")
-        
-        # Track metrics
-        redis_client.hincrby(f"{REDIS_PREFIX}buy_tracker", "alerts_posted", 1)
-        redis_client.hincrby(f"{REDIS_PREFIX}buy_tracker", "total_sol_tracked", int(sol_amount))
-        
-        logger.info(f"✅ Posted buy alert tweet: {sol_amount:.1f} SOL buy")
-        
-    except Exception as e:
-        logger.error(f"Error posting buy alert: {e}")
-
+import sys
 
 like_timestamps = deque()
-LIKE_LIMIT = 50  # or choose an appropriate per-15-min limit
+LIKE_LIMIT = 50
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # List of problematic tweet IDs to always skip
-BLOCKED_TWEET_IDS = ["1924845778821845267"]  # Add the specific tweet ID that's causing issues
+BLOCKED_TWEET_IDS = ["1924845778821845267"]
 
 # Load environment variables
 load_dotenv()
@@ -265,12 +31,15 @@ required = [
     "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET",
     "X_BEARER_TOKEN",
     "GROK_API_KEY",
-    "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD",
-"HELIUS_API_KEY"
+    "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"
 ]
 for var in required:
     if not os.getenv(var):
         raise RuntimeError(f"Missing env var: {var}")
+
+# Optional environment variables
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
+MINIMUM_BUY_SOL = 1.0
 
 # Twitter API setup
 oauth = tweepy.OAuth1UserHandler(
@@ -309,28 +78,25 @@ DEGEN_ADDR = "6ztpBm31cmBNPwa396ocmDfaWyKKY95Bu8T664QfCe7f"
 GROK_URL = "https://api.x.ai/v1/chat/completions"
 DEXS_SEARCH_URL = "https://api.dexscreener.com/api/search?query="
 DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
-HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 
 ADDR_RE = re.compile(r"\b[A-Za-z0-9]{43,44}\b")
 SYMBOL_RE = re.compile(r"\$([A-Za-z0-9]{2,10})", re.IGNORECASE)
-USERNAME_RE = re.compile(rf"@{BOT_USERNAME}\b", re.IGNORECASE)  # Match bot's username
+USERNAME_RE = re.compile(rf"@{BOT_USERNAME}\b", re.IGNORECASE)
 
 RATE_WINDOW = 900
 MENTIONS_LIMIT = 10
 TWEETS_LIMIT = 50
-SEARCH_LIMIT = 10  # Limit for search API calls
+SEARCH_LIMIT = 15
 LIKE_LIMIT = 50 
 mentions_timestamps = deque()
 tweet_timestamps = deque()
 search_timestamps = deque()
 
 # Set initial search ID to current time-based ID to avoid the "since_id too old" error
-# Twitter IDs are roughly time-based, so this gives us a recent starting point
-current_time_ms = int(time.time() * 1000) - 1728000000  # Adjust for Twitter's epoch
+current_time_ms = int(time.time() * 1000) - 1728000000
 INITIAL_SEARCH_ID = str((current_time_ms << 22))
 
 # Helpers
-
 def truncate_to_sentence(text: str, max_length: int) -> str:
     if len(text) <= max_length:
         return text
@@ -363,7 +129,7 @@ def update_thread(cid, user_text, bot_text):
 SYSTEM_PROMPT = (
     "You are a degenerate gambler crypto analyst: edgy, informal, risk-taking. No slang. High class but a little edgy like Don Draper. "
     "IF DEGEN, or $DEGEN is mentioned, always ONLY speak about the $DEGEN token at contract address {DEGEN_ADDR}. DO not include the contract address in the reply. "
-    "Do NOT mention any other token or chain when it comes to DEGEN.  Other tokens you can reply honestly."
+    "Do NOT mention any other token or chain when it comes to DEGEN. Other tokens you can reply honestly."
 )
 
 def ask_grok(prompt: str) -> str:
@@ -394,15 +160,14 @@ async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
     try:
         return fn(*args, **kwargs)
     except (requests.exceptions.ConnectionError, http.client.RemoteDisconnected) as e:
-            logger.warning(f"Network error during API call: {e}. Retrying in 5s…")
-            await asyncio.sleep(5)
-            return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
+        logger.warning(f"Network error during API call: {e}. Retrying in 5s…")
+        await asyncio.sleep(5)
+        return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
     except tweepy.TooManyRequests as e:
         reset = int(e.response.headers.get('x-rate-limit-reset', time.time()+RATE_WINDOW))
         await asyncio.sleep(reset - time.time() + 1)
         return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
     except tweepy.BadRequest as e:
-        # Pass BadRequest up to be handled by the caller
         raise e
     except Exception as e:
         logger.error(f"API call error: {e}", exc_info=True)
@@ -483,10 +248,7 @@ def build_dex_reply(addr: str) -> str:
     return format_metrics(data) + data['link']
 
 async def post_raid(tweet):
-    """
-    Include thread history in raid prompt and post a bullpost with a random meme.
-    Enhanced with better error handling and logging.
-    """
+    """Post a bullpost for $DEGEN based on the tweet"""
     try:
         convo_id = tweet.conversation_id or tweet.id
         history = get_thread_history(convo_id)
@@ -515,7 +277,6 @@ async def post_raid(tweet):
         meme_files = glob.glob("raid_images/*.jpg")
         if not meme_files:
             logger.warning("No meme images found in raid_images/ directory")
-            # Post without image if no memes available
             await safe_tweet(
                 text=truncate_to_sentence(msg, 240),
                 in_reply_to_tweet_id=tweet.id
@@ -534,8 +295,8 @@ async def post_raid(tweet):
         
     except Exception as e:
         logger.error(f"Error in post_raid for tweet {tweet.id}: {e}", exc_info=True)
-        # Mark as replied to avoid getting stuck
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
+
 async def search_degen_loop():
     """Enhanced search for 'degen' tweets from users with 500+ followers"""
     key = f"{REDIS_PREFIX}last_degen_id"
@@ -546,12 +307,12 @@ async def search_degen_loop():
         try:
             last_id = redis_client.get(key)
             params = {
-                "query": "degen -is:retweet -is:reply",  # Added -is:reply to focus on original tweets
+                "query": "degen -is:retweet -is:reply",
                 "since_id": last_id,
                 "tweet_fields": ["id", "text", "conversation_id", "created_at", "author_id"],
                 "expansions": ["author_id"],
-                "user_fields": ["username", "public_metrics"],  # Include public_metrics for follower count
-                "max_results": 50  # Increased to get more potential candidates
+                "user_fields": ["username", "public_metrics"],
+                "max_results": 50
             }
             res = await safe_search(x_client.search_recent_tweets, **params)
             
@@ -581,11 +342,10 @@ async def search_degen_loop():
                             logger.info(f"Found qualified tweet from @{author.username} ({follower_count} followers): {tw.text[:50]}...")
                 
                 # Process qualified tweets (limit to avoid rate limits)
-                for tw in qualified_tweets[:3]:  # Process max 3 per cycle to stay under limits
+                for tw in qualified_tweets[:3]:
                     try:
                         await post_raid(tw)
                         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-                        # Small delay between replies
                         await asyncio.sleep(10)
                     except Exception as e:
                         logger.error(f"Error processing qualified tweet {tw.id}: {e}")
@@ -597,10 +357,10 @@ async def search_degen_loop():
         except Exception as e:
             logger.error(f"search_degen_loop error: {e}", exc_info=True)
         
-        await asyncio.sleep(240)  # Every 4 minutes (reduced frequency to stay under limits)
+        await asyncio.sleep(240)
 
 async def auto_like_degen_loop():
-    """Enhanced auto-like for 'degen' tweets (case insensitive) from users with decent following"""
+    """Enhanced auto-like for 'degen' tweets from users with decent following"""
     key = f"{REDIS_PREFIX}last_like_id"
     if not redis_client.exists(key):
         redis_client.set(key, INITIAL_SEARCH_ID)
@@ -609,7 +369,7 @@ async def auto_like_degen_loop():
         try:
             last_id = redis_client.get(key)
             params = {
-                "query": "degen -is:retweet",  # Case insensitive search for 'degen'
+                "query": "degen -is:retweet",
                 "since_id": last_id,
                 "tweet_fields": ["id", "text", "author_id"],
                 "expansions": ["author_id"],
@@ -631,20 +391,16 @@ async def auto_like_degen_loop():
                 for tw in res.data:
                     tid = str(tw.id)
                     
-                    # Skip if already liked
                     if redis_client.sismember(f"{REDIS_PREFIX}liked_ids", tid):
                         continue
                     
-                    # Check if tweet contains degen (case insensitive) or $DEGEN
                     tweet_text_upper = tw.text.upper()
                     if "DEGEN" in tweet_text_upper:
-                        # Optional: filter by follower count for likes too (lower threshold)
                         author = user_map.get(tw.author_id)
                         follower_count = 0
                         if author and hasattr(author, 'public_metrics'):
                             follower_count = author.public_metrics.get('followers_count', 0)
                         
-                        # Like tweets from users with 100+ followers (lower threshold for likes)
                         if follower_count >= 100:
                             try:
                                 await safe_like(tid)
@@ -652,11 +408,9 @@ async def auto_like_degen_loop():
                                 liked_count += 1
                                 logger.info(f"Liked tweet from @{author.username if author else 'unknown'} ({follower_count} followers)")
                                 
-                                # Limit likes per cycle to avoid hitting rate limits
                                 if liked_count >= 10:
                                     break
                                     
-                                # Small delay between likes
                                 await asyncio.sleep(2)
                             except Exception as e:
                                 logger.error(f"Error liking tweet {tid}: {e}")
@@ -668,8 +422,7 @@ async def auto_like_degen_loop():
         except Exception as e:
             logger.error(f"auto_like_degen_loop error: {e}", exc_info=True)
         
-        await asyncio.sleep(360)  # Every 6 minutes (reduced frequency for likes)
-
+        await asyncio.sleep(360)
 
 async def handle_mention(tw):
     try:
@@ -681,6 +434,7 @@ async def handle_mention(tw):
             except Exception as e:
                 logger.warning(f"Failed to get root tweet: {e}")
                 update_thread(convo_id, f"ROOT: Unknown", "")
+        
         history = get_thread_history(convo_id)
         txt = re.sub(rf"@{BOT_USERNAME}\b", "", tw.text, flags=re.IGNORECASE).strip()
 
@@ -700,9 +454,6 @@ async def handle_mention(tw):
 
         # 3) Check for DEX or other contract address commands
         if re.search(r"\b(dex|contract|address)\b", txt, re.IGNORECASE):
-            # Include the DEXScreener link to generate preview instead of attaching a meme
-            dex_data = fetch_data(DEGEN_ADDR)
-            dex_link = dex_data.get('link', f"https://dexscreener.com/solana/{DEGEN_ADDR}")
             await safe_tweet(
                 text=f"{build_dex_reply(DEGEN_ADDR)}",
                 in_reply_to_tweet_id=tw.id
@@ -716,9 +467,6 @@ async def handle_mention(tw):
             sym = token.lstrip('$').upper()
             addr = DEGEN_ADDR if sym=="DEGEN" else lookup_address(token)
             if addr:
-                # Include the DEXScreener link to generate preview instead of attaching a meme
-                dex_data = fetch_data(addr)
-                dex_link = dex_data.get('link', f"https://dexscreener.com/solana/{addr}")
                 await safe_tweet(
                     text=build_dex_reply(addr),
                     in_reply_to_tweet_id=tw.id
@@ -730,30 +478,29 @@ async def handle_mention(tw):
         prompt = (
             f"History:{history}\n"
             f"User asked: \"{txt}\"\n"
-            "First, answer naturally and concisely. "
-       
+            "First, answer naturally and concisely."
         )
         raw = ask_grok(prompt)
         
-        # Ensure we have a complete response that doesn't get cut off
         reply_body = raw.strip()
         
-        # Make sure the response contains $DEGEN mention and contract address
         if "$DEGEN" not in reply_body:
             reply = f"{reply_body}\n\nStack $DEGEN! Contract Address: {DEGEN_ADDR}"
         else:
-            # If $DEGEN is already mentioned, just add the contract address if needed
             if DEGEN_ADDR not in reply_body:
                 reply = f"{reply_body}\n\nStack $DEGEN. ca: {DEGEN_ADDR}"
             else:
                 reply = reply_body
         
-        # Ensure we're not exceeding Twitter's character limit
         if len(reply) > 360:
             reply = truncate_to_sentence(reply, 360) + f"\n\n$DEGEN. ca: {DEGEN_ADDR}"
         
-        img = choice(glob.glob("raid_images/*.jpg"))
-        media_id = x_api.media_upload(img).media_id_string
+        meme_files = glob.glob("raid_images/*.jpg")
+        if meme_files:
+            img = choice(meme_files)
+            media_id = x_api.media_upload(img).media_id_string
+        else:
+            media_id = None
         
         await safe_tweet(
             text=reply,
@@ -763,16 +510,13 @@ async def handle_mention(tw):
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
         update_thread(convo_id, txt, reply)
         increment_thread(convo_id)
+        
     except Exception as e:
         logger.error(f"Error handling mention {tw.id}: {e}", exc_info=True)
-        # Mark the tweet as replied to avoid getting stuck in a loop
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+
 async def search_mentions_loop():
-    """
-    New loop to handle searching for mentions that might not be captured by the mentions API,
-    especially mentions in communities.
-    """
-    # Initialize last_search_id if not present
+    """Search for mentions that might not be captured by the mentions API"""
     if not redis_client.exists(f"{REDIS_PREFIX}last_search_id"):
         redis_client.set(f"{REDIS_PREFIX}last_search_id", INITIAL_SEARCH_ID)
         logger.info(f"Initialized last_search_id to {INITIAL_SEARCH_ID}")
@@ -789,7 +533,6 @@ async def search_mentions_loop():
             }
             
             try:
-                # Always try without since_id first to avoid the age restriction error
                 search_results = await safe_search(
                     x_client.search_recent_tweets,
                     **search_params
@@ -803,28 +546,21 @@ async def search_mentions_loop():
                 newest_id = max(int(tw.id) for tw in search_results.data) if search_results.data else 0
                 
                 for tw in search_results.data:
-                    # IMMEDIATELY skip any tweet in our blocklist
                     if str(tw.id) in BLOCKED_TWEET_IDS:
                         logger.info(f"Skipping blocked tweet ID: {tw.id}")
                         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
                         continue
                         
-                    # Skip if we've already processed this tweet
                     if redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
                         continue
                     
                     try:
-                        # Get the full tweet text from tw
                         logger.info(f"Processing community mention: {tw.id} - {tw.text[:30]}...")
-                        
-                        # Process the mention
                         await handle_mention(tw)
                     except Exception as e:
                         logger.error(f"Error processing mention {tw.id}: {e}", exc_info=True)
-                        # Mark as replied to avoid getting stuck in a loop
                         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
                 
-                # Update the last search ID
                 if newest_id > 0:
                     redis_client.set(f"{REDIS_PREFIX}last_search_id", str(newest_id))
                     logger.info(f"Updated last_search_id to {newest_id}")
@@ -832,35 +568,29 @@ async def search_mentions_loop():
         except Exception as e:
             logger.error(f"Search mentions loop error: {e}", exc_info=True)
         
-        # Wait before next search
-        await asyncio.sleep(180)  # Run every 3 minutes
+        await asyncio.sleep(180)
 
 async def hourly_post_loop():
-    # Create a list of varied prompts for Grok to generate different types of content
     grok_prompts = [
-        "Write a positive one-sentence analytical update on $DEGEN using data from the last hour. Do not mention the contract address. No slang.  High class but a little edgy like David Foster Wallace.",
-        "Write a positive one-sentence cryptic message about secret teck being developed on $DEGEN's price action. Be edgy and risky. Do not mention the contract address.  No slang.  High class but a little edgy like Don Draper.",
-        
-        "Write a one sentence, cryptic message about $DEGEN that implies insider knowledge. Do not mention the contract address. No slang.  High class but a little edgy like David Foster Wallace.",
-        "Write a one sentence, cryptic comment about people who haven't bought $DEGEN yet. Do not mention the contract address. No slang.  High class but a little edgy like Elon Musk.",
-        "Write a one sentence comparing $DEGEN to the broader crypto market. Be cryptic. Do not mention the contract address.  No slang.  High class but a little edgy like Hemmingway.",
-        "Write a one sentence post about diamond hands and $DEGEN's future potential. Do not mention the contract address. No slang.  High class but a little edgy like Hunter Thompson."
+        "Write a positive one-sentence analytical update on $DEGEN using data from the last hour. Do not mention the contract address. No slang. High class but a little edgy like David Foster Wallace.",
+        "Write a positive one-sentence cryptic message about secret tech being developed on $DEGEN's price action. Be edgy and risky. Do not mention the contract address. No slang. High class but a little edgy like Don Draper.",
+        "Write a one sentence, cryptic message about $DEGEN that implies insider knowledge. Do not mention the contract address. No slang. High class but a little edgy like David Foster Wallace.",
+        "Write a one sentence, cryptic comment about people who haven't bought $DEGEN yet. Do not mention the contract address. No slang. High class but a little edgy like Elon Musk.",
+        "Write a one sentence comparing $DEGEN to the broader crypto market. Be cryptic. Do not mention the contract address. No slang. High class but a little edgy like Hemingway.",
+        "Write a one sentence post about diamond hands and $DEGEN's future potential. Do not mention the contract address. No slang. High class but a little edgy like Hunter Thompson."
     ]
     
     hour_counter = 0
 
     while True:
         try:
-            # Fetch on-chain and market data
-            data     = fetch_data(DEGEN_ADDR)
-            metrics  = format_metrics(data)
+            data = fetch_data(DEGEN_ADDR)
+            metrics = format_metrics(data)
             dex_link = data.get('link', f"https://dexscreener.com/solana/{DEGEN_ADDR}")
 
-            # Ask Grok for a clean one-liner
             selected_prompt = grok_prompts[hour_counter % len(grok_prompts)]
-            raw             = ask_grok(selected_prompt).strip()
+            raw = ask_grok(selected_prompt).strip()
 
-            # Build tweet: metrics block, one-liner, then link on its own line
             tweet = (
                 metrics.rstrip() +
                 "\n\n" +
@@ -869,43 +599,158 @@ async def hourly_post_loop():
                 dex_link
             )
 
-            # Only post if it’s new
             last = redis_client.get(f"{REDIS_PREFIX}last_hourly_post")
             if tweet != last:
                 await safe_tweet(tweet)
                 redis_client.set(f"{REDIS_PREFIX}last_hourly_post", tweet)
+                logger.info("Posted hourly update")
 
             hour_counter += 1
         except Exception as e:
             logger.error(f"Hourly post error: {e}")
+        
         await asyncio.sleep(3600)
 
+async def monitor_volume_spikes_loop():
+    """Monitor for volume spikes that indicate major buys"""
+    previous_volume = None
+    
+    while True:
+        try:
+            data = fetch_data(DEGEN_ADDR)
+            current_volume = data.get('volume_usd', 0)
+            current_change_1h = data.get('change_1h', 0)
+            
+            if previous_volume is not None and current_volume > 0:
+                volume_increase = current_volume - previous_volume
+                volume_increase_pct = (volume_increase / previous_volume) * 100 if previous_volume > 0 else 0
+                
+                # Detect significant volume spike (>50% increase in 5 minutes)
+                if volume_increase_pct > 50 and volume_increase > 1000:
+                    estimated_sol_value = volume_increase / 140
+                    
+                    if estimated_sol_value >= MINIMUM_BUY_SOL:
+                        await post_volume_spike_tweet(estimated_sol_value, volume_increase, current_change_1h)
+                        logger.info(f"Posted volume spike tweet: ${volume_increase:,.0f} volume increase")
+                
+                # Detect significant price pump (>20% in 1 hour)
+                elif current_change_1h > 20:
+                    estimated_buy_value = current_volume * 0.1
+                    estimated_sol = estimated_buy_value / 140
+                    
+                    if estimated_sol >= MINIMUM_BUY_SOL:
+                        await post_price_pump_tweet(current_change_1h, estimated_sol)
+                        logger.info(f"Posted price pump tweet: {current_change_1h:.1f}% pump")
+            
+            previous_volume = current_volume
+            
+        except Exception as e:
+            logger.error(f"Volume monitoring error: {e}")
+        
+        await asyncio.sleep(300)  # Check every 5 minutes
+
+async def post_volume_spike_tweet(estimated_sol, volume_increase, price_change):
+    """Post tweet about volume spike indicating major buy"""
+    try:
+        # Check cooldown
+        if redis_client.exists(f"{REDIS_PREFIX}volume_spike_posted"):
+            return
+            
+        spike_prompts = [
+            f"🚨 VOLUME SPIKE! ${volume_increase:,.0f} just flowed into $DEGEN (~{estimated_sol:.1f} SOL)! Someone's loading up! 💎",
+            f"🐋 BIG MONEY MOVING! ${volume_increase:,.0f} volume spike on $DEGEN! Smart money is accumulating! 🚀",
+            f"💰 WHALE ACTIVITY! Massive ${volume_increase:,.0f} buy pressure on $DEGEN! Don't sleep on this! 👀",
+            f"🔥 VOLUME EXPLOSION! ${volume_increase:,.0f} just hit $DEGEN! The smart money knows something! 💯"
+        ]
+        
+        tweet_text = choice(spike_prompts)
+        
+        if price_change > 0:
+            tweet_text += f"\n\nPrice pumping {price_change:+.1f}% in the last hour!"
+        
+        tweet_text += f"\n\nChart: https://dexscreener.com/solana/{DEGEN_ADDR}"
+        
+        meme_files = glob.glob("raid_images/*.jpg")
+        if meme_files:
+            img = choice(meme_files)
+            media_id = x_api.media_upload(img).media_id_string
+        else:
+            media_id = None
+        
+        await safe_tweet(
+            text=tweet_text,
+            media_id=media_id
+        )
+        
+        redis_client.setex(f"{REDIS_PREFIX}volume_spike_posted", 1800, "1")  # 30 min cooldown
+        logger.info(f"Successfully posted volume spike tweet")
+        
+    except Exception as e:
+        logger.error(f"Error posting volume spike tweet: {e}")
+
+async def post_price_pump_tweet(price_change, estimated_sol):
+    """Post tweet about significant price pump"""
+    try:
+        if redis_client.exists(f"{REDIS_PREFIX}pump_tweet_posted"):
+            return
+            
+        pump_prompts = [
+            f"🚀 $DEGEN PUMPING! Up {price_change:+.1f}% in the last hour! Someone knows something! 💎",
+            f"📈 PRICE ALERT! $DEGEN surging {price_change:+.1f}%! Big money is moving! 🐋",
+            f"🔥 $DEGEN ON FIRE! {price_change:+.1f}% pump! Don't get left behind! 💯",
+            f"💰 BREAKOUT! $DEGEN up {price_change:+.1f}%! Smart money is accumulating! 🚀"
+        ]
+        
+        tweet_text = choice(pump_prompts)
+        tweet_text += f"\n\nLive chart: https://dexscreener.com/solana/{DEGEN_ADDR}"
+        
+        meme_files = glob.glob("raid_images/*.jpg")
+        if meme_files:
+            img = choice(meme_files)
+            media_id = x_api.media_upload(img).media_id_string
+        else:
+            media_id = None
+        
+        await safe_tweet(
+            text=tweet_text,
+            media_id=media_id
+        )
+        
+        redis_client.setex(f"{REDIS_PREFIX}pump_tweet_posted", 3600, "1")  # 1 hour cooldown
+        logger.info(f"Successfully posted pump tweet: {price_change:.1f}%")
+        
+    except Exception as e:
+        logger.error(f"Error posting pump tweet: {e}")
+
 async def main():
-    # Start WebSocket monitoring
-    start_websocket_monitoring()
-    
-    # Pre-mark all blocked tweets as replied to
-    for tweet_id in BLOCKED_TWEET_IDS:
-        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tweet_id)
-        logger.info(f"Pre-marked blocked tweet ID {tweet_id} as replied")
-    
-    # Run all your existing loops
-    await asyncio.gather(
-        search_mentions_loop(),
-        hourly_post_loop(),
-        search_degen_loop(),
-        auto_like_degen_loop(),
-    )
+    try:
+        logger.info("🤖 Starting DEGEN bot...")
+        
+        # Pre-mark all blocked tweets as replied to
+        for tweet_id in BLOCKED_TWEET_IDS:
+            redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tweet_id)
+            logger.info(f"Pre-marked blocked tweet ID {tweet_id} as replied")
+        
+        logger.info("✅ Bot initialized - starting all loops...")
+        
+        # Run all loops
+        await asyncio.gather(
+            search_mentions_loop(),
+            hourly_post_loop(),
+            search_degen_loop(),
+            auto_like_degen_loop(),
+            monitor_volume_spikes_loop(),  # This replaces WebSocket for now
+        )
+        
+    except Exception as e:
+        logger.error(f"Main function error: {e}", exc_info=True)
+        raise
 
-# Clean shutdown handler
-import signal
-import sys
-
-def signal_handler(sig, frame):
-    logger.info("Shutting down WebSocket connection...")
-    if websocket_client:
-        websocket_client.close()
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
+    except Exception as e:
+        logger.error(f"Bot crashed: {e}", exc_info=True)
+        sys.exit(1)

@@ -15,8 +15,7 @@ import http.client
 import sys
 import random
 
-like_timestamps = deque()
-LIKE_LIMIT = 25  # Reduced from 50
+# Removed liking functionality - no longer needed
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -94,7 +93,6 @@ RATE_WINDOW = 900
 MENTIONS_LIMIT = 8   # Reduced from 10
 TWEETS_LIMIT = 25    # Reduced from 50
 SEARCH_LIMIT = 15    # Reduced from 20
-LIKE_LIMIT = 25      # Reduced from 50
 mentions_timestamps = deque()
 tweet_timestamps = deque()
 search_timestamps = deque()
@@ -132,13 +130,7 @@ SEARCH_QUERIES = [
     "fud -is:retweet -is:reply"
 ]
 
-LIKE_QUERIES = [
-    "crypto", "bitcoin", "ethereum", "solana", "memecoin", "altcoin",
-    "blockchain", "defi", "web3", "hodl", "pump", "moon", "gem",
-    "$BTC", "$ETH", "$SOL", "#crypto", "#bitcoin", "#ethereum",
-    "trading", "invest", "portfolio", "bull market", "bear market",
-    "nft", "token", "coin", "wallet", "exchange", "dex"
-]
+# Removed LIKE_QUERIES - no longer liking tweets
 
 # Helpers
 def truncate_to_sentence(text: str, max_length: int) -> str:
@@ -255,25 +247,24 @@ async def safe_tweet(text: str, media_id=None, **kwargs):
         **kwargs
     )
 
-async def safe_like(tweet_id: str):
-    return await safe_api_call(
-        lambda tid: x_api.create_favorite(id=tid),
-        like_timestamps,
-        LIKE_LIMIT,
-        tweet_id
-    )
+# Removed safe_like function - no longer liking tweets
 
 # Rate limit monitoring
 async def check_rate_limit_status():
     """Monitor rate limits and pause if needed"""
     try:
-        limits = x_api.get_rate_limit_status()
-        tweets_remaining = limits['resources']['statuses']['/statuses/update']['remaining']
-        if tweets_remaining < 5:
-            logger.warning(f"Low tweet limit remaining: {tweets_remaining}, slowing down...")
-            await asyncio.sleep(900)  # Wait 15 minutes
+        # Try different rate limit methods depending on tweepy version
+        if hasattr(x_api, 'get_rate_limit_status'):
+            limits = x_api.get_rate_limit_status()
+            tweets_remaining = limits['resources']['statuses']['/statuses/update']['remaining']
+            if tweets_remaining < 5:
+                logger.warning(f"Low tweet limit remaining: {tweets_remaining}, slowing down...")
+                await asyncio.sleep(900)  # Wait 15 minutes
+        else:
+            # Rate limit checking not available, just log
+            logger.debug("Rate limit status not available with current API access")
     except Exception as e:
-        logger.warning(f"Could not check rate limits: {e}")
+        logger.debug(f"Rate limit check unavailable: {e}")
 
 # DEX helpers - Keep your original functions
 def fetch_data(addr: str) -> dict:
@@ -296,6 +287,7 @@ def fetch_data(addr: str) -> dict:
         return {}
 
 def format_metrics(d: dict) -> str:
+    """Format DEX data with icons - EXACTLY as original"""
     return (
         f"🚀 {d['symbol']} | ${d['price_usd']:,.6f}\n"
         f"MC ${d['market_cap']:,.0f} | Vol24 ${d['volume_usd']:,.0f}\n"
@@ -320,8 +312,13 @@ def lookup_address(token: str) -> str:
     return None
 
 def build_dex_reply(addr: str) -> str:
+    """Build DEX reply with SAME FORMAT as hourly posts"""
     data = fetch_data(addr)
-    return format_metrics(data) + data['link']
+    if not data:
+        return f"Data temporarily unavailable\n\nhttps://dexscreener.com/solana/{addr}"
+    
+    metrics = format_metrics(data)
+    return metrics.rstrip() + "\n\n" + data['link']
 
 async def post_crypto_raid(tweet):
     """Post contextual $DEGEN promotion - KEEP YOUR ORIGINAL PROMPTS"""
@@ -354,9 +351,12 @@ async def post_crypto_raid(tweet):
         
         msg = ask_grok(prompt)
         
-        # ALWAYS ensure contract address is included
-        if DEGEN_ADDR not in msg:
-            msg = f"{msg}\n\nCA: {DEGEN_ADDR}"
+        # Clean any existing contract address formatting and always add at end
+        msg = msg.replace(f"CA: {DEGEN_ADDR}", "").replace(f"ca: {DEGEN_ADDR}", "").strip()
+        msg = msg.replace(f"\n{DEGEN_ADDR}", "").replace(DEGEN_ADDR, "").strip()
+        
+        # Always add contract address cleanly at the end
+        msg = f"{msg}\n\nCA: {DEGEN_ADDR}"
         
         # Try to use meme images occasionally
         media_id = None
@@ -477,74 +477,7 @@ async def broad_crypto_raid_loop():
         
         await asyncio.sleep(600)  # Every 10 minutes (was 5) - MORE SUSTAINABLE
 
-async def aggressive_crypto_like_loop():
-    """Crypto liking - REDUCED RATE for sustainability"""
-    like_query_index = 0
-    
-    while True:
-        try:
-            # Check rate limits before proceeding
-            await check_rate_limit_status()
-            
-            # Rotate through like queries
-            current_like_query = LIKE_QUERIES[like_query_index % len(LIKE_QUERIES)]
-            like_query_index += 1
-            
-            params = {
-                "query": f"{current_like_query} -is:retweet",
-                "tweet_fields": ["id", "text", "author_id"],
-                "expansions": ["author_id"],
-                "user_fields": ["username", "public_metrics"],
-                "max_results": 25  # Reduced from 50
-            }
-            res = await safe_search(x_client.search_recent_tweets, **params)
-            
-            if res and res.data:
-                # Create user mapping
-                user_map = {}
-                if hasattr(res, 'includes') and res.includes and 'users' in res.includes:
-                    for user in res.includes['users']:
-                        user_map[user.id] = user
-                
-                liked_count = 0
-                for tw in res.data:
-                    tid = str(tw.id)
-                    
-                    if redis_client.sismember(f"{REDIS_PREFIX}liked_ids", tid):
-                        continue
-                    
-                    author = user_map.get(tw.author_id)
-                    follower_count = 0
-                    if author and hasattr(author, 'public_metrics'):
-                        follower_count = author.public_metrics.get('followers_count', 0)
-                    
-                    # QUALITY LIKING - focus on decent accounts
-                    if follower_count >= 25:  # Higher threshold
-                        try:
-                            await safe_like(tid)
-                            redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
-                            liked_count += 1
-                            logger.info(f"👍 Liked crypto: @{author.username if author else 'unknown'} ({follower_count} followers)")
-                            
-                            # REDUCED like limit per cycle
-                            if liked_count >= 8:  # Max 8 likes (was 15)
-                                break
-                                
-                            # Delay between likes
-                            await asyncio.sleep(random.uniform(3, 8))
-                        except Exception as e:
-                            logger.error(f"Error liking tweet {tid}: {e}")
-                            redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
-                
-                logger.info(f"💙 Liked {liked_count} '{current_like_query}' tweets")
-                
-            else:
-                logger.info(f"💙 No tweets found for '{current_like_query}'")
-                
-        except Exception as e:
-            logger.error(f"aggressive_crypto_like_loop error: {e}", exc_info=True)
-        
-        await asyncio.sleep(900)  # Every 15 minutes (was 10) - MORE SUSTAINABLE
+# Removed aggressive_crypto_like_loop - no longer liking tweets
 
 async def monitor_ogdegen_loop():
     """Monitor @ogdegenonsol for new tweets and reply to ALL of them"""
@@ -940,22 +873,21 @@ async def post_price_pump_tweet(price_change, estimated_sol):
 
 async def main():
     try:
-        logger.info("🚀 Starting FIXED CRYPTO PROMOTION bot for $DEGEN...")
-        logger.info("✅ Fixed: No @mentions in replies, sustainable rates, better error handling")
+        logger.info("🚀 Starting CRYPTO PROMOTION bot for $DEGEN...")
+        logger.info("✅ Fixed: No @mentions in replies, no liking, sustainable raid rates")
         
         # Pre-mark all blocked tweets as replied to
         for tweet_id in BLOCKED_TWEET_IDS:
             redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tweet_id)
             logger.info(f"Pre-marked blocked tweet ID {tweet_id} as replied")
         
-        logger.info("💎 SUSTAINABLE MODE - reduced rates to avoid suspension...")
+        logger.info("💎 SUSTAINABLE MODE - crypto raiding only, no liking...")
         
-        # Run all loops with sustainable rates
+        # Run all loops - NO LIKING
         await asyncio.gather(
             search_mentions_loop(),          # Keep mention handling with ca/dex/raid commands
             hourly_post_loop(),             # Keep your original hourly posts
             broad_crypto_raid_loop(),       # Reduced: 3 raids every 10 minutes
-            aggressive_crypto_like_loop(),  # Reduced: 8 likes every 15 minutes
             monitor_volume_spikes_loop(),   # Keep volume monitoring
             monitor_ogdegen_loop(),         # Keep ogdegen monitoring
         )

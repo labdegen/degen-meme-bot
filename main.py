@@ -30,7 +30,8 @@ required = [
     "X_ACCESS_TOKEN", "X_ACCESS_TOKEN_SECRET",
     "X_BEARER_TOKEN",
     "GROK_API_KEY",
-    "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD"
+    "REDIS_HOST", "REDIS_PORT", "REDIS_PASSWORD",
+"HELIUS_API_KEY"
 ]
 for var in required:
     if not os.getenv(var):
@@ -725,14 +726,147 @@ async def hourly_post_loop():
         except Exception as e:
             logger.error(f"Hourly post error: {e}")
         await asyncio.sleep(3600)
+# ADD THESE IMPORTS to your existing imports at the top
+from flask import Flask, request, jsonify
+import threading
+from datetime import datetime
 
+# ADD THESE CONSTANTS after your existing constants
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
+MINIMUM_BUY_SOL = 1.0  # Minimum 1 SOL buy to trigger post
+WEBHOOK_PORT = int(os.getenv("PORT", 8080))  # Render provides PORT env var
+
+# ADD THIS FLASK APP after your existing setup
+app = Flask(__name__)
+
+@app.route('/webhook', methods=['POST'])
+def helius_webhook():
+    """Handle incoming webhook notifications from Helius"""
+    try:
+        data = request.json
+        logger.info(f"Received webhook data: {len(data)} transactions")
+        
+        # Process each transaction in the webhook payload
+        for transaction in data:
+            asyncio.create_task(process_major_buy(transaction))
+            
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        logger.error(f"Webhook processing error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint for Render"""
+    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()}), 200
+
+async def process_major_buy(transaction_data):
+    """Process potential major buy transaction and post to Twitter if criteria met"""
+    try:
+        # Extract transaction details
+        signature = transaction_data.get('signature')
+        
+        # Skip if we've already processed this transaction
+        if redis_client.sismember(f"{REDIS_PREFIX}processed_buys", signature):
+            return
+            
+        # Look for token transfers involving our DEGEN token
+        token_transfers = transaction_data.get('tokenTransfers', [])
+        
+        for transfer in token_transfers:
+            # Check if this involves our DEGEN token
+            if transfer.get('mint') == DEGEN_ADDR:
+                # Look for the corresponding SOL amount spent
+                # This is a simplified approach - you may need to adjust based on actual webhook data structure
+                
+                # For now, let's look for any significant DEGEN transfer and estimate SOL value
+                token_amount = float(transfer.get('tokenAmount', 0))
+                
+                # Get current DEGEN price to estimate SOL spent
+                degen_data = fetch_data(DEGEN_ADDR)
+                degen_price_usd = degen_data.get('price_usd', 0)
+                
+                if degen_price_usd > 0:
+                    usd_value = token_amount * degen_price_usd
+                    sol_equivalent = usd_value / 140  # Approximate SOL price
+                    
+                    if sol_equivalent >= MINIMUM_BUY_SOL:
+                        await post_major_buy_tweet(sol_equivalent, signature, transaction_data)
+                        redis_client.sadd(f"{REDIS_PREFIX}processed_buys", signature)
+                        logger.info(f"Posted major buy tweet for ~{sol_equivalent:.1f} SOL equivalent purchase")
+                        break
+        
+    except Exception as e:
+        logger.error(f"Error processing major buy: {e}")
+
+async def post_major_buy_tweet(sol_amount, signature, transaction_data):
+    """Post a tweet about a major DEGEN purchase"""
+    try:
+        # Get current DEGEN data for context
+        degen_data = fetch_data(DEGEN_ADDR)
+        usd_value = sol_amount * 140  # Approximate SOL price
+        
+        # Create engaging tweet about the major buy
+        buy_prompts = [
+            f"🚨 MAJOR BUY ALERT! Someone just scooped ~{sol_amount:.1f} SOL worth of $DEGEN (~${usd_value:,.0f})! Smart money is accumulating 💎",
+            f"🐋 WHALE SPOTTED! ~{sol_amount:.1f} SOL worth of $DEGEN just moved! That's conviction! 🚀",
+            f"💰 BIG MOVES! ~{sol_amount:.1f} SOL buy on $DEGEN just hit the chain! Someone knows something... 👀",
+            f"🔥 DEGEN ENERGY! ~{sol_amount:.1f} SOL worth of $DEGEN just got snatched up! Don't get left behind! 💯"
+        ]
+        
+        tweet_text = choice(buy_prompts)
+        
+        # Add transaction link and contract address
+        tx_link = f"https://solscan.io/tx/{signature}"
+        full_tweet = f"{tweet_text}\n\nTx: {tx_link}\nStack $DEGEN: {DEGEN_ADDR}"
+        
+        # Ensure we don't exceed Twitter's character limit
+        if len(full_tweet) > 280:
+            full_tweet = f"{tweet_text}\n\nTx: {tx_link}"
+        
+        # Choose a random meme image
+        meme_files = glob.glob("raid_images/*.jpg")
+        if meme_files:
+            img = choice(meme_files)
+            media_id = x_api.media_upload(img).media_id_string
+        else:
+            media_id = None
+        
+        # Post the tweet
+        await safe_tweet(
+            text=full_tweet,
+            media_id=media_id
+        )
+        
+        logger.info(f"Successfully posted major buy tweet: {sol_amount:.1f} SOL")
+        
+    except Exception as e:
+        logger.error(f"Error posting major buy tweet: {e}")
+
+def start_webhook_server():
+    """Start the Flask webhook server in a separate thread"""
+    app.run(host='0.0.0.0', port=WEBHOOK_PORT, debug=False)
+
+# MODIFY your existing main() function to include this:
 async def main():
+    # Start webhook server in a separate thread
+    webhook_thread = threading.Thread(target=start_webhook_server)
+    webhook_thread.daemon = True
+    webhook_thread.start()
+    logger.info(f"Webhook server started on port {WEBHOOK_PORT}")
+    
     # Pre-mark all blocked tweets as replied to
     for tweet_id in BLOCKED_TWEET_IDS:
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tweet_id)
         logger.info(f"Pre-marked blocked tweet ID {tweet_id} as replied")
     
-    await asyncio.gather(search_mentions_loop(),hourly_post_loop(),search_degen_loop(),auto_like_degen_loop())
+    # Run all your existing loops
+    await asyncio.gather(
+        search_mentions_loop(),
+        hourly_post_loop(),
+        search_degen_loop(),
+        auto_like_degen_loop(),
+    )
 
 if __name__ == "__main__":
     asyncio.run(main())

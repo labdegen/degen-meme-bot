@@ -140,11 +140,20 @@ def truncate_to_sentence(text: str, max_length: int) -> str:
     return snippet
 
 def clean_reply_text(text: str) -> str:
-    """Remove all @mentions from reply text to avoid spam detection"""
+    """Clean reply text properly - remove @mentions and fix punctuation"""
     # Remove @username patterns
     cleaned = re.sub(r'@\w+', '', text)
-    # Clean up extra spaces
-    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    
+    # Fix common punctuation issues from @mention removal
+    cleaned = re.sub(r'^[\s,\.\!]+', '', cleaned)  # Remove leading punctuation
+    cleaned = re.sub(r'[\s,]+([,\.])', r'\1', cleaned)  # Fix double punctuation  
+    cleaned = re.sub(r'\s+', ' ', cleaned)  # Clean multiple spaces
+    cleaned = cleaned.strip()
+    
+    # Ensure it starts with a capital letter
+    if cleaned and cleaned[0].islower():
+        cleaned = cleaned[0].upper() + cleaned[1:]
+    
     return cleaned
 
 def fix_degen_spacing(text: str) -> str:
@@ -223,7 +232,6 @@ async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
         return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
     except tweepy.Forbidden as e:
         logger.error(f"FORBIDDEN - Possible suspension: {e}")
-        # Don't retry forbidden errors, they indicate suspension or access issues
         raise e
     except tweepy.BadRequest as e:
         logger.error(f"Bad request: {e}")
@@ -251,23 +259,6 @@ async def safe_tweet(text: str, media_id=None, **kwargs):
         media_id, 
         **kwargs
     )
-
-# Rate limit monitoring
-async def check_rate_limit_status():
-    """Monitor rate limits and pause if needed"""
-    try:
-        # Try different rate limit methods depending on tweepy version
-        if hasattr(x_api, 'get_rate_limit_status'):
-            limits = x_api.get_rate_limit_status()
-            tweets_remaining = limits['resources']['statuses']['/statuses/update']['remaining']
-            if tweets_remaining < 5:
-                logger.warning(f"Low tweet limit remaining: {tweets_remaining}, slowing down...")
-                await asyncio.sleep(900)  # Wait 15 minutes
-        else:
-            # Rate limit checking not available, just log
-            logger.debug("Rate limit status not available with current API access")
-    except Exception as e:
-        logger.debug(f"Rate limit check unavailable: {e}")
 
 # DEX helpers - Keep your original functions
 def fetch_data(addr: str) -> dict:
@@ -326,7 +317,7 @@ def build_dex_reply(addr: str) -> str:
     metrics = format_metrics(data)
     return f"{metrics}\n\n{data['link']}"
 
-async def post_crypto_raid(tweet):
+async def post_raid(tweet):
     """Post contextual $DEGEN promotion - KEEP YOUR ORIGINAL PROMPTS"""
     try:
         convo_id = tweet.conversation_id or tweet.id
@@ -364,22 +355,19 @@ async def post_crypto_raid(tweet):
         # Always add contract address cleanly at the end
         msg = f"{msg}\n\nCA: {DEGEN_ADDR}"
         
-        # Try to use meme images occasionally
+        # Try to use meme images
         media_id = None
-        use_image = random.random() < 0.2  # 20% chance
-        
-        if use_image:
-            try:
-                meme_files = glob.glob("raid_images/*.jpg")
-                if meme_files:
-                    img = choice(meme_files)
-                    media_id = x_api.media_upload(img).media_id_string
-            except tweepy.Forbidden as e:
-                logger.warning(f"Media upload restricted, posting text-only: {e}")
-                media_id = None
-            except Exception as e:
-                logger.warning(f"Media upload failed, posting text-only: {e}")
-                media_id = None
+        try:
+            meme_files = glob.glob("raid_images/*.jpg")
+            if meme_files:
+                img = choice(meme_files)
+                media_id = x_api.media_upload(img).media_id_string
+        except tweepy.Forbidden as e:
+            logger.warning(f"Media upload restricted, posting text-only: {e}")
+            media_id = None
+        except Exception as e:
+            logger.warning(f"Media upload failed, posting text-only: {e}")
+            media_id = None
         
         await safe_tweet(
             text=truncate_to_sentence(msg, 240),
@@ -391,11 +379,41 @@ async def post_crypto_raid(tweet):
         logger.info(f"✅ Posted crypto raid reply to tweet {tweet.id}")
         
         # Random delay to look more human
-        await asyncio.sleep(random.uniform(10, 30))  # Increased delays
+        await asyncio.sleep(random.uniform(10, 30))
         
     except Exception as e:
-        logger.error(f"Error in post_crypto_raid for tweet {tweet.id}: {e}", exc_info=True)
+        logger.error(f"Error in post_raid for tweet {tweet.id}: {e}", exc_info=True)
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
+
+async def search_degen_loop():
+    """Search for 'degen' mentions and raid them"""
+    key = f"{REDIS_PREFIX}last_degen_id"
+    if not redis_client.exists(key):
+        redis_client.set(key, INITIAL_SEARCH_ID)
+
+    while True:
+        try:
+            last_id = redis_client.get(key)
+            params = {
+                "query": "degen -is:retweet",
+                "since_id": last_id,
+                "tweet_fields": ["id", "text", "conversation_id", "created_at"],
+                "max_results": 10
+            }
+            res = await safe_search(x_client.search_recent_tweets, **params)
+            if res and res.data:
+                newest = max(int(t.id) for t in res.data)
+                for tw in res.data:
+                    tid = str(tw.id)
+                    if tid in BLOCKED_TWEET_IDS or redis_client.sismember(f"{REDIS_PREFIX}replied_ids", tid):
+                        continue
+                    await post_raid(tw)
+                    redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tid)
+                redis_client.set(key, str(newest))
+                logger.info(f"🎯 Processed {len(res.data)} degen mentions")
+        except Exception as e:
+            logger.error(f"search_degen_loop error: {e}", exc_info=True)
+        await asyncio.sleep(300)  # every 5 minutes
 
 async def broad_crypto_raid_loop():
     """Crypto raiding - REDUCED RATE for sustainability"""
@@ -403,9 +421,6 @@ async def broad_crypto_raid_loop():
     
     while True:
         try:
-            # Check rate limits before proceeding
-            await check_rate_limit_status()
-            
             # Rotate through different search queries for maximum coverage
             current_query = SEARCH_QUERIES[query_index % len(SEARCH_QUERIES)]
             query_index += 1
@@ -415,7 +430,7 @@ async def broad_crypto_raid_loop():
                 "tweet_fields": ["id", "text", "conversation_id", "created_at", "author_id"],
                 "expansions": ["author_id"],
                 "user_fields": ["username", "public_metrics"],
-                "max_results": 25  # Reduced from 50
+                "max_results": 25
             }
             res = await safe_search(x_client.search_recent_tweets, **params)
             
@@ -454,10 +469,6 @@ async def broad_crypto_raid_loop():
                     # 3. Raid substantial crypto discussions from smaller accounts
                     elif follower_count >= 15 and len(tw.text) > 60 and any(term in tw.text.lower() for term in ["crypto", "coin", "token", "blockchain"]):
                         should_raid = True
-                        
-                    # 4. Skip very low quality accounts
-                    elif follower_count < 10:
-                        should_raid = False
                     
                     if should_raid:
                         qualified_tweets.append(tw)
@@ -467,7 +478,7 @@ async def broad_crypto_raid_loop():
                 # Process FEWER qualified tweets - SUSTAINABLE RATE
                 for tw in qualified_tweets[:3]:  # Only 3 per cycle
                     try:
-                        await post_crypto_raid(tw)
+                        await post_raid(tw)
                         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
                     except Exception as e:
                         logger.error(f"Error processing crypto raid {tw.id}: {e}")
@@ -483,89 +494,44 @@ async def broad_crypto_raid_loop():
         
         await asyncio.sleep(600)  # Every 10 minutes - SUSTAINABLE
 
-async def monitor_ogdegen_loop():
-    """Monitor @ogdegenonsol for new tweets and reply to ALL of them"""
-    key = f"{REDIS_PREFIX}last_ogdegen_id"
+async def auto_like_degen_loop():
+    """Like tweets mentioning $DEGEN"""
+    key = f"{REDIS_PREFIX}last_like_id"
     if not redis_client.exists(key):
         redis_client.set(key, INITIAL_SEARCH_ID)
-        logger.info(f"🎯 Starting @ogdegenonsol monitoring")
 
     while True:
         try:
             last_id = redis_client.get(key)
             params = {
-                "query": "from:ogdegenonsol -is:retweet",
+                "query": "DEGEN -is:retweet",
                 "since_id": last_id,
-                "tweet_fields": ["id", "text", "conversation_id", "created_at", "author_id"],
+                "tweet_fields": ["id", "text"],
                 "max_results": 10
             }
             res = await safe_search(x_client.search_recent_tweets, **params)
-            
             if res and res.data:
                 newest = max(int(t.id) for t in res.data)
-                
+                liked_count = 0
                 for tw in res.data:
                     tid = str(tw.id)
-                    
-                    # Skip if already replied
-                    if redis_client.sismember(f"{REDIS_PREFIX}replied_ids", tid):
-                        continue
-                    
-                    try:
-                        logger.info(f"🔥 NEW @ogdegenonsol TWEET: {tw.text[:50]}...")
-                        
-                        # Create special raid response for ogdegen tweets - KEEP YOUR ORIGINAL PROMPT
-                        prompt = (
-                            f"@ogdegenonsol just posted: '{tw.text}'\n"
-                            "Write an enthusiastic supportive reply promoting $DEGEN. "
-                            f"Include contract address {DEGEN_ADDR} and tag @ogdegenonsol. "
-                            "End with NFA. Be bullish and supportive. High class but edgy like Don Draper."
-                        )
-                        
-                        msg = ask_grok(prompt)
-                        
-                        # Clean and always add contract address at end
-                        msg = msg.replace(f"CA: {DEGEN_ADDR}", "").replace(f"ca: {DEGEN_ADDR}", "").strip()
-                        msg = msg.replace(f"\n{DEGEN_ADDR}", "").replace(DEGEN_ADDR, "").strip()
-                        msg = f"{msg}\n\nCA: {DEGEN_ADDR}"
-                        
-                        # Use meme for ogdegen replies (30% chance)
-                        media_id = None
-                        if random.random() < 0.3:
-                            try:
-                                meme_files = glob.glob("raid_images/*.jpg")
-                                if meme_files:
-                                    img = choice(meme_files)
-                                    media_id = x_api.media_upload(img).media_id_string
-                            except:
-                                media_id = None
-                        
-                        await safe_tweet(
-                            text=truncate_to_sentence(msg, 240),
-                            media_id=media_id,
-                            in_reply_to_tweet_id=tw.id
-                        )
-                        
-                        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-                        logger.info(f"✅ Replied to @ogdegenonsol tweet {tw.id}")
-                        
-                    except Exception as e:
-                        logger.error(f"Error replying to ogdegen tweet {tw.id}: {e}")
-                        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-                
+                    if "$DEGEN" in tw.text.upper() and not redis_client.sismember(f"{REDIS_PREFIX}liked_ids", tid):
+                        try:
+                            x_api.create_favorite(id=tid)
+                            redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
+                            liked_count += 1
+                            logger.info(f"👍 Liked $DEGEN tweet: {tid}")
+                        except Exception as e:
+                            logger.warning(f"Like failed for {tid}: {e}")
+                            redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
                 redis_client.set(key, str(newest))
-                logger.info(f"🎯 Monitored @ogdegenonsol - processed {len(res.data)} tweets")
-                
-            else:
-                logger.info("🎯 No new @ogdegenonsol tweets")
-                
+                logger.info(f"💙 Liked {liked_count} $DEGEN tweets")
         except Exception as e:
-            logger.error(f"monitor_ogdegen_loop error: {e}", exc_info=True)
-        
-        await asyncio.sleep(120)  # Check every 2 minutes
+            logger.error(f"auto_like_degen_loop error: {e}", exc_info=True)
+        await asyncio.sleep(300)  # every 5 minutes
 
 async def handle_mention(tw):
-    """KEEP YOUR ORIGINAL MENTION HANDLING with ca, dex, raid commands"""
+    """FIXED MENTION HANDLING - Clean replies with contract address and memes"""
     try:
         convo_id = tw.conversation_id or tw.id
         if redis_client.hget(get_thread_key(convo_id), "count") is None:
@@ -581,7 +547,7 @@ async def handle_mention(tw):
 
         # 1) raid command
         if re.search(r"\braid\b", txt, re.IGNORECASE):
-            await post_crypto_raid(tw)
+            await post_raid(tw)
             return
 
         # 2) Check for CA command (contract address only)
@@ -615,37 +581,38 @@ async def handle_mention(tw):
                 redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
                 return
 
-        # 5) general fallback
+        # 5) general fallback - CLEAN REPLY WITH CONTRACT ADDRESS
         prompt = (
             f"History:{history}\n"
             f"User asked: \"{txt}\"\n"
-            "First, answer naturally and concisely."
+            "Answer naturally and concisely."
         )
         raw = ask_grok(prompt)
         
         reply_body = raw.strip()
         
+        # Always include $DEGEN and contract address
         if "$DEGEN" not in reply_body:
             reply = f"{reply_body}\n\nStack $DEGEN! Contract Address: {DEGEN_ADDR}"
         else:
             if DEGEN_ADDR not in reply_body:
-                reply = f"{reply_body}\n\nStack $DEGEN. ca: {DEGEN_ADDR}"
+                reply = f"{reply_body}\n\nStack $DEGEN. CA: {DEGEN_ADDR}"
             else:
                 reply = reply_body
         
         if len(reply) > 360:
-            reply = truncate_to_sentence(reply, 360) + f"\n\n$DEGEN. ca: {DEGEN_ADDR}"
+            reply = truncate_to_sentence(reply, 360) + f"\n\n$DEGEN. CA: {DEGEN_ADDR}"
         
-        # 30% chance to use meme image
+        # Try to use meme image
         media_id = None
-        if random.random() < 0.3:
-            try:
-                meme_files = glob.glob("raid_images/*.jpg")
-                if meme_files:
-                    img = choice(meme_files)
-                    media_id = x_api.media_upload(img).media_id_string
-            except:
-                media_id = None
+        try:
+            meme_files = glob.glob("raid_images/*.jpg")
+            if meme_files:
+                img = choice(meme_files)
+                media_id = x_api.media_upload(img).media_id_string
+        except Exception as e:
+            logger.warning(f"Meme upload failed: {e}")
+            media_id = None
         
         await safe_tweet(
             text=reply,
@@ -757,144 +724,25 @@ async def hourly_post_loop():
         
         await asyncio.sleep(3600)
 
-async def monitor_volume_spikes_loop():
-    """Monitor for volume spikes that indicate major buys"""
-    previous_volume = None
-    
-    while True:
-        try:
-            data = fetch_data(DEGEN_ADDR)
-            current_volume = data.get('volume_usd', 0)
-            current_change_1h = data.get('change_1h', 0)
-            
-            if previous_volume is not None and current_volume > 0:
-                volume_increase = current_volume - previous_volume
-                volume_increase_pct = (volume_increase / previous_volume) * 100 if previous_volume > 0 else 0
-                
-                # Detect significant volume spike (>50% increase in 5 minutes)
-                if volume_increase_pct > 50 and volume_increase > 1000:
-                    estimated_sol_value = volume_increase / 140
-                    
-                    if estimated_sol_value >= MINIMUM_BUY_SOL:
-                        await post_volume_spike_tweet(estimated_sol_value, volume_increase, current_change_1h)
-                        logger.info(f"Posted volume spike tweet: ${volume_increase:,.0f} volume increase")
-                
-                # Detect significant price pump (>20% in 1 hour)
-                elif current_change_1h > 20:
-                    estimated_buy_value = current_volume * 0.1
-                    estimated_sol = estimated_buy_value / 140
-                    
-                    if estimated_sol >= MINIMUM_BUY_SOL:
-                        await post_price_pump_tweet(current_change_1h, estimated_sol)
-                        logger.info(f"Posted price pump tweet: {current_change_1h:.1f}% pump")
-            
-            previous_volume = current_volume
-            
-        except Exception as e:
-            logger.error(f"Volume monitoring error: {e}")
-        
-        await asyncio.sleep(300)  # Check every 5 minutes
-
-async def post_volume_spike_tweet(estimated_sol, volume_increase, price_change):
-    """Post tweet about volume spike indicating major buy"""
-    try:
-        # Check cooldown
-        if redis_client.exists(f"{REDIS_PREFIX}volume_spike_posted"):
-            return
-            
-        spike_prompts = [
-            f"🚨 VOLUME SPIKE! ${volume_increase:,.0f} just flowed into $DEGEN (~{estimated_sol:.1f} SOL)! Someone's loading up! 💎",
-            f"🐋 BIG MONEY MOVING! ${volume_increase:,.0f} volume spike on $DEGEN! Smart money is accumulating! 🚀",
-            f"💰 WHALE ACTIVITY! Massive ${volume_increase:,.0f} buy pressure on $DEGEN! Don't sleep on this! 👀",
-            f"🔥 VOLUME EXPLOSION! ${volume_increase:,.0f} just hit $DEGEN! The smart money knows something! 💯"
-        ]
-        
-        tweet_text = choice(spike_prompts)
-        
-        if price_change > 0:
-            tweet_text += f"\n\nPrice pumping {price_change:+.1f}% in the last hour!"
-        
-        tweet_text += f"\n\nChart: https://dexscreener.com/solana/{DEGEN_ADDR}"
-        
-        # 30% chance to use meme
-        media_id = None
-        if random.random() < 0.3:
-            try:
-                meme_files = glob.glob("raid_images/*.jpg")
-                if meme_files:
-                    img = choice(meme_files)
-                    media_id = x_api.media_upload(img).media_id_string
-            except:
-                media_id = None
-        
-        await safe_tweet(
-            text=tweet_text,
-            media_id=media_id
-        )
-        
-        redis_client.setex(f"{REDIS_PREFIX}volume_spike_posted", 1800, "1")  # 30 min cooldown
-        logger.info(f"Successfully posted volume spike tweet")
-        
-    except Exception as e:
-        logger.error(f"Error posting volume spike tweet: {e}")
-
-async def post_price_pump_tweet(price_change, estimated_sol):
-    """Post tweet about significant price pump"""
-    try:
-        if redis_client.exists(f"{REDIS_PREFIX}pump_tweet_posted"):
-            return
-            
-        pump_prompts = [
-            f"🚀 $DEGEN PUMPING! Up {price_change:+.1f}% in the last hour! Someone knows something! 💎",
-            f"📈 PRICE ALERT! $DEGEN surging {price_change:+.1f}%! Big money is moving! 🐋",
-            f"🔥 $DEGEN ON FIRE! {price_change:+.1f}% pump! Don't get left behind! 💯",
-            f"💰 BREAKOUT! $DEGEN up {price_change:+.1f}%! Smart money is accumulating! 🚀"
-        ]
-        
-        tweet_text = choice(pump_prompts)
-        tweet_text += f"\n\nLive chart: https://dexscreener.com/solana/{DEGEN_ADDR}"
-        
-        # 30% chance to use meme
-        media_id = None
-        if random.random() < 0.3:
-            try:
-                meme_files = glob.glob("raid_images/*.jpg")
-                if meme_files:
-                    img = choice(meme_files)
-                    media_id = x_api.media_upload(img).media_id_string
-            except:
-                media_id = None
-        
-        await safe_tweet(
-            text=tweet_text,
-            media_id=media_id
-        )
-        
-        redis_client.setex(f"{REDIS_PREFIX}pump_tweet_posted", 3600, "1")  # 1 hour cooldown
-        logger.info(f"Successfully posted pump tweet: {price_change:.1f}%")
-        
-    except Exception as e:
-        logger.error(f"Error posting pump tweet: {e}")
-
 async def main():
     try:
         logger.info("🚀 Starting CRYPTO PROMOTION bot for $DEGEN...")
-        logger.info("✅ Fixed: No @mentions in replies, no liking, proper $DEGEN spacing, CA in raids")
+        logger.info("✅ Fixed: Clean replies, contract addresses, meme images, proper hourly format")
         
         # Pre-mark all blocked tweets as replied to
         for tweet_id in BLOCKED_TWEET_IDS:
             redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tweet_id)
             logger.info(f"Pre-marked blocked tweet ID {tweet_id} as replied")
         
-        logger.info("💎 SUSTAINABLE MODE - crypto raiding only, no liking...")
+        logger.info("💎 Starting all bot functions...")
         
-        # Run all loops - NO LIKING
+        # Run all loops
         await asyncio.gather(
-            search_mentions_loop(),          # Keep mention handling with ca/dex/raid commands
-            hourly_post_loop(),             # EXACT format as image 
-            broad_crypto_raid_loop(),       # Reduced: 3 raids every 10 minutes
-            monitor_volume_spikes_loop(),   # Keep volume monitoring
-            monitor_ogdegen_loop(),         # Keep ogdegen monitoring
+            search_mentions_loop(),      # Handle @mentions with clean replies
+            hourly_post_loop(),         # EXACT format as image 
+            search_degen_loop(),        # Search 'degen' and raid
+            broad_crypto_raid_loop(),   # Broad crypto raiding
+            auto_like_degen_loop(),     # Like $DEGEN tweets
         )
         
     except Exception as e:

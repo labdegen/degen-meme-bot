@@ -13,6 +13,7 @@ from random import choice
 import glob
 import http.client
 import sys
+import random
 
 like_timestamps = deque()
 LIKE_LIMIT = 50
@@ -86,7 +87,7 @@ USERNAME_RE = re.compile(rf"@{BOT_USERNAME}\b", re.IGNORECASE)
 RATE_WINDOW = 900
 MENTIONS_LIMIT = 10
 TWEETS_LIMIT = 50
-SEARCH_LIMIT = 20  # Increased for broader searching
+SEARCH_LIMIT = 20
 LIKE_LIMIT = 50 
 mentions_timestamps = deque()
 tweet_timestamps = deque()
@@ -236,6 +237,18 @@ async def safe_like(tweet_id: str):
         tweet_id
     )
 
+# Rate limit monitoring
+async def check_rate_limit_status():
+    """Monitor rate limits and pause if needed"""
+    try:
+        limits = x_api.get_rate_limit_status()
+        tweets_remaining = limits['resources']['statuses']['/statuses/update']['remaining']
+        if tweets_remaining < 10:
+            logger.warning(f"Low tweet limit remaining: {tweets_remaining}, slowing down...")
+            await asyncio.sleep(900)  # Wait 15 minutes
+    except Exception as e:
+        logger.warning(f"Could not check rate limits: {e}")
+
 # DEX helpers
 def fetch_data(addr: str) -> dict:
     try:
@@ -319,13 +332,22 @@ async def post_crypto_raid(tweet):
         if DEGEN_ADDR not in msg:
             msg = f"{msg}\n\nCA: {DEGEN_ADDR}"
         
-        # Use meme images for crypto raids
-        meme_files = glob.glob("raid_images/*.jpg")
-        if meme_files:
-            img = choice(meme_files)
-            media_id = x_api.media_upload(img).media_id_string
-        else:
-            media_id = None
+        # Try to use meme images, but continue without if restricted (30% of the time only)
+        media_id = None
+        use_image = random.random() < 0.3  # Only 30% chance to use image
+        
+        if use_image:
+            try:
+                meme_files = glob.glob("raid_images/*.jpg")
+                if meme_files:
+                    img = choice(meme_files)
+                    media_id = x_api.media_upload(img).media_id_string
+            except tweepy.Forbidden as e:
+                logger.warning(f"Media upload restricted, posting text-only: {e}")
+                media_id = None
+            except Exception as e:
+                logger.warning(f"Media upload failed, posting text-only: {e}")
+                media_id = None
         
         await safe_tweet(
             text=truncate_to_sentence(msg, 240),
@@ -336,16 +358,22 @@ async def post_crypto_raid(tweet):
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
         logger.info(f"✅ Posted crypto raid reply to tweet {tweet.id}")
         
+        # Random delay to look more human
+        await asyncio.sleep(random.uniform(3, 8))
+        
     except Exception as e:
         logger.error(f"Error in post_crypto_raid for tweet {tweet.id}: {e}", exc_info=True)
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
 
 async def broad_crypto_raid_loop():
-    """MAXIMUM REACH - raid memecoin and crypto tweets to promote $DEGEN"""
+    """SUSTAINABLE crypto raiding - avoids restrictions"""
     query_index = 0
     
     while True:
         try:
+            # Check rate limits before proceeding
+            await check_rate_limit_status()
+            
             # Rotate through different search queries for maximum coverage
             current_query = SEARCH_QUERIES[query_index % len(SEARCH_QUERIES)]
             query_index += 1
@@ -355,7 +383,7 @@ async def broad_crypto_raid_loop():
                 "tweet_fields": ["id", "text", "conversation_id", "created_at", "author_id"],
                 "expansions": ["author_id"],
                 "user_fields": ["username", "public_metrics"],
-                "max_results": 100
+                "max_results": 50  # Reduced from 100
             }
             res = await safe_search(x_client.search_recent_tweets, **params)
             
@@ -380,46 +408,40 @@ async def broad_crypto_raid_loop():
                     if author and hasattr(author, 'public_metrics'):
                         follower_count = author.public_metrics.get('followers_count', 0)
                     
-                    # BROAD TARGETING - raid crypto/memecoin tweets:
+                    # SUSTAINABLE TARGETING - focus on quality
                     should_raid = False
                     
-                    # 1. Prioritize accounts with decent following (20+ followers)
-                    if follower_count >= 20:
+                    # 1. Prioritize accounts with decent following (50+ followers)
+                    if follower_count >= 50:
                         should_raid = True
                         
                     # 2. Always raid tweets mentioning other memecoins (perfect audience)
                     elif any(coin in tw.text.upper() for coin in ["$DOGE", "$SHIB", "$PEPE", "$BONK", "$WIF"]):
                         should_raid = True
                         
-                    # 3. Raid substantial crypto discussions
-                    elif len(tw.text) > 50 and any(term in tw.text.lower() for term in ["crypto", "coin", "token", "blockchain"]):
+                    # 3. Raid substantial crypto discussions from smaller accounts
+                    elif follower_count >= 20 and len(tw.text) > 80 and any(term in tw.text.lower() for term in ["crypto", "coin", "token", "blockchain"]):
                         should_raid = True
                         
                     # 4. Skip very low quality accounts
-                    elif follower_count < 5:
+                    elif follower_count < 10:
                         should_raid = False
-                        
-                    # 5. Otherwise raid it for maximum reach
-                    else:
-                        should_raid = True
                     
                     if should_raid:
                         qualified_tweets.append(tw)
                         username = author.username if author else 'unknown'
                         logger.info(f"🎯 CRYPTO RAID: @{username} ({follower_count} followers): {tw.text[:50]}...")
                 
-                # Process qualified tweets - increased to 15 per cycle for maximum promotion
-                for tw in qualified_tweets[:15]:
+                # Process FEWER qualified tweets - SAFE SUSTAINABLE RATE
+                for tw in qualified_tweets[:5]:  # Only 5 per cycle (was 15)
                     try:
                         await post_crypto_raid(tw)
                         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-                        # Quick delay for rapid promotion
-                        await asyncio.sleep(2)
                     except Exception as e:
                         logger.error(f"Error processing crypto raid {tw.id}: {e}")
                         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
                 
-                logger.info(f"🚀 CRYPTO RAIDED {len(qualified_tweets[:15])} tweets using query: '{current_query[:30]}...'")
+                logger.info(f"🚀 CRYPTO RAIDED {len(qualified_tweets[:5])} tweets using query: '{current_query[:30]}...'")
                 
             else:
                 logger.info(f"🔍 No results for query: '{current_query[:30]}...'")
@@ -427,14 +449,17 @@ async def broad_crypto_raid_loop():
         except Exception as e:
             logger.error(f"broad_crypto_raid_loop error: {e}", exc_info=True)
         
-        await asyncio.sleep(60)  # Every minute with different search terms
+        await asyncio.sleep(300)  # Every 5 minutes (was 60 seconds) - SUSTAINABLE RATE
 
 async def aggressive_crypto_like_loop():
-    """MAXIMUM LIKES - like tons of crypto/memecoin content"""
+    """SUSTAINABLE crypto liking - avoids restrictions"""
     like_query_index = 0
     
     while True:
         try:
+            # Check rate limits before proceeding
+            await check_rate_limit_status()
+            
             # Rotate through like queries
             current_like_query = LIKE_QUERIES[like_query_index % len(LIKE_QUERIES)]
             like_query_index += 1
@@ -444,7 +469,7 @@ async def aggressive_crypto_like_loop():
                 "tweet_fields": ["id", "text", "author_id"],
                 "expansions": ["author_id"],
                 "user_fields": ["username", "public_metrics"],
-                "max_results": 100
+                "max_results": 50  # Reduced from 100
             }
             res = await safe_search(x_client.search_recent_tweets, **params)
             
@@ -467,19 +492,20 @@ async def aggressive_crypto_like_loop():
                     if author and hasattr(author, 'public_metrics'):
                         follower_count = author.public_metrics.get('followers_count', 0)
                     
-                    # VERY BROAD LIKING - like almost all crypto content
-                    if follower_count >= 1:  # Like from almost any real account
+                    # SUSTAINABLE LIKING - focus on quality accounts
+                    if follower_count >= 10:  # Higher threshold (was 1)
                         try:
                             await safe_like(tid)
                             redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
                             liked_count += 1
                             logger.info(f"👍 Liked crypto: @{author.username if author else 'unknown'} ({follower_count} followers)")
                             
-                            # Increased like limit to 50 per cycle
-                            if liked_count >= 50:
+                            # REDUCED like limit per cycle - SUSTAINABLE
+                            if liked_count >= 15:  # Max 15 likes (was 50)
                                 break
                                 
-                            await asyncio.sleep(0.5)  # Very fast liking
+                            # Random delay between likes
+                            await asyncio.sleep(random.uniform(1, 3))
                         except Exception as e:
                             logger.error(f"Error liking tweet {tid}: {e}")
                             redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
@@ -492,7 +518,7 @@ async def aggressive_crypto_like_loop():
         except Exception as e:
             logger.error(f"aggressive_crypto_like_loop error: {e}", exc_info=True)
         
-        await asyncio.sleep(90)  # Every 90 seconds with different terms
+        await asyncio.sleep(600)  # Every 10 minutes (was 90 seconds) - SUSTAINABLE RATE
 
 async def monitor_ogdegen_loop():
     """Monitor @ogdegenonsol for new tweets and reply to ALL of them"""
@@ -535,13 +561,20 @@ async def monitor_ogdegen_loop():
                         
                         msg = ask_grok(prompt)
                         
-                        # Use meme for ogdegen replies
-                        meme_files = glob.glob("raid_images/*.jpg")
-                        if meme_files:
-                            img = choice(meme_files)
-                            media_id = x_api.media_upload(img).media_id_string
-                        else:
-                            media_id = None
+                        # Always include contract address
+                        if DEGEN_ADDR not in msg:
+                            msg = f"{msg}\n\nCA: {DEGEN_ADDR}"
+                        
+                        # Use meme for ogdegen replies (50% chance)
+                        media_id = None
+                        if random.random() < 0.5:
+                            try:
+                                meme_files = glob.glob("raid_images/*.jpg")
+                                if meme_files:
+                                    img = choice(meme_files)
+                                    media_id = x_api.media_upload(img).media_id_string
+                            except:
+                                media_id = None
                         
                         await safe_tweet(
                             text=truncate_to_sentence(msg, 240),
@@ -638,12 +671,16 @@ async def handle_mention(tw):
         if len(reply) > 360:
             reply = truncate_to_sentence(reply, 360) + f"\n\n$DEGEN. ca: {DEGEN_ADDR}"
         
-        meme_files = glob.glob("raid_images/*.jpg")
-        if meme_files:
-            img = choice(meme_files)
-            media_id = x_api.media_upload(img).media_id_string
-        else:
-            media_id = None
+        # 50% chance to use meme image
+        media_id = None
+        if random.random() < 0.5:
+            try:
+                meme_files = glob.glob("raid_images/*.jpg")
+                if meme_files:
+                    img = choice(meme_files)
+                    media_id = x_api.media_upload(img).media_id_string
+            except:
+                media_id = None
         
         await safe_tweet(
             text=reply,
@@ -715,7 +752,7 @@ async def search_mentions_loop():
 
 async def hourly_post_loop():
     grok_prompts = [
-        "Write a positive one-sentence cryptic degenerate genius analytical update on $DEGEN using data from the last hour. Do not mention the contract address. No slang. High class but a little edgy like David Foster Wallace.",
+        "Write a positive one-sentence analytical update on $DEGEN using data from the last hour. Do not mention the contract address. No slang. High class but a little edgy like David Foster Wallace.",
         "Write a positive one-sentence cryptic message about secret tech being developed on $DEGEN's price action. Be edgy and risky. Do not mention the contract address. No slang. High class but a little edgy like Don Draper.",
         "Write a one sentence, cryptic message about $DEGEN that implies insider knowledge. Do not mention the contract address. No slang. High class but a little edgy like David Foster Wallace.",
         "Write a one sentence, cryptic comment about people who haven't bought $DEGEN yet. Do not mention the contract address. No slang. High class but a little edgy like Elon Musk.",
@@ -813,12 +850,16 @@ async def post_volume_spike_tweet(estimated_sol, volume_increase, price_change):
         
         tweet_text += f"\n\nChart: https://dexscreener.com/solana/{DEGEN_ADDR}"
         
-        meme_files = glob.glob("raid_images/*.jpg")
-        if meme_files:
-            img = choice(meme_files)
-            media_id = x_api.media_upload(img).media_id_string
-        else:
-            media_id = None
+        # 50% chance to use meme
+        media_id = None
+        if random.random() < 0.5:
+            try:
+                meme_files = glob.glob("raid_images/*.jpg")
+                if meme_files:
+                    img = choice(meme_files)
+                    media_id = x_api.media_upload(img).media_id_string
+            except:
+                media_id = None
         
         await safe_tweet(
             text=tweet_text,
@@ -847,12 +888,16 @@ async def post_price_pump_tweet(price_change, estimated_sol):
         tweet_text = choice(pump_prompts)
         tweet_text += f"\n\nLive chart: https://dexscreener.com/solana/{DEGEN_ADDR}"
         
-        meme_files = glob.glob("raid_images/*.jpg")
-        if meme_files:
-            img = choice(meme_files)
-            media_id = x_api.media_upload(img).media_id_string
-        else:
-            media_id = None
+        # 50% chance to use meme
+        media_id = None
+        if random.random() < 0.5:
+            try:
+                meme_files = glob.glob("raid_images/*.jpg")
+                if meme_files:
+                    img = choice(meme_files)
+                    media_id = x_api.media_upload(img).media_id_string
+            except:
+                media_id = None
         
         await safe_tweet(
             text=tweet_text,
@@ -867,21 +912,21 @@ async def post_price_pump_tweet(price_change, estimated_sol):
 
 async def main():
     try:
-        logger.info("🚀 Starting BROAD CRYPTO PROMOTION bot for $DEGEN...")
+        logger.info("🚀 Starting SUSTAINABLE CRYPTO PROMOTION bot for $DEGEN...")
         
         # Pre-mark all blocked tweets as replied to
         for tweet_id in BLOCKED_TWEET_IDS:
             redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tweet_id)
             logger.info(f"Pre-marked blocked tweet ID {tweet_id} as replied")
         
-        logger.info("💎 MAXIMUM REACH MODE - targeting ALL crypto/memecoin content...")
+        logger.info("💎 SUSTAINABLE MODE - smart targeting to avoid restrictions...")
         
-        # Run all loops with the new broad targeting
+        # Run all loops with sustainable rates
         await asyncio.gather(
             search_mentions_loop(),          # Keep existing mention handling
             hourly_post_loop(),             # Keep existing hourly posts
-            broad_crypto_raid_loop(),       # NEW: Broad crypto raiding
-            aggressive_crypto_like_loop(),  # NEW: Aggressive crypto liking
+            broad_crypto_raid_loop(),       # SUSTAINABLE: 5 raids every 5 minutes
+            aggressive_crypto_like_loop(),  # SUSTAINABLE: 15 likes every 10 minutes
             monitor_volume_spikes_loop(),   # Keep volume monitoring
             monitor_ogdegen_loop(),         # Keep ogdegen monitoring
         )

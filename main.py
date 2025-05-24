@@ -86,7 +86,7 @@ USERNAME_RE = re.compile(rf"@{BOT_USERNAME}\b", re.IGNORECASE)
 RATE_WINDOW = 900
 MENTIONS_LIMIT = 10
 TWEETS_LIMIT = 50
-SEARCH_LIMIT = 15
+SEARCH_LIMIT = 20  # Increased for broader searching
 LIKE_LIMIT = 50 
 mentions_timestamps = deque()
 tweet_timestamps = deque()
@@ -95,6 +95,43 @@ search_timestamps = deque()
 # Set initial search ID to current time-based ID to avoid the "since_id too old" error
 current_time_ms = int(time.time() * 1000) - 1728000000
 INITIAL_SEARCH_ID = str((current_time_ms << 22))
+
+# BROAD SEARCH TERMS FOR MAXIMUM CRYPTO REACH
+SEARCH_QUERIES = [
+    "memecoin -is:retweet -is:reply",
+    "meme coin -is:retweet -is:reply", 
+    "shitcoin -is:retweet -is:reply",
+    "altcoin gem -is:retweet -is:reply",
+    "moonshot -is:retweet -is:reply",
+    "crypto pump -is:retweet -is:reply",
+    "solana gem -is:retweet -is:reply",
+    "#memecoin -is:retweet -is:reply",
+    "#altcoin -is:retweet -is:reply",
+    "buy the dip -is:retweet -is:reply",
+    "diamond hands -is:retweet -is:reply",
+    "hodl -is:retweet -is:reply",
+    "$DOGE OR $SHIB OR $PEPE -is:retweet -is:reply",
+    "$BONK OR $WIF OR $FLOKI -is:retweet -is:reply",
+    "ape into -is:retweet -is:reply",
+    "crypto twitter -is:retweet -is:reply",
+    "good entry -is:retweet -is:reply",
+    "accumulating -is:retweet -is:reply",
+    "bullish on -is:retweet -is:reply",
+    "next gem -is:retweet -is:reply",
+    "x100 -is:retweet -is:reply",
+    "to the moon -is:retweet -is:reply",
+    "paper hands -is:retweet -is:reply",
+    "wagmi -is:retweet -is:reply",
+    "fud -is:retweet -is:reply"
+]
+
+LIKE_QUERIES = [
+    "crypto", "bitcoin", "ethereum", "solana", "memecoin", "altcoin",
+    "blockchain", "defi", "web3", "hodl", "pump", "moon", "gem",
+    "$BTC", "$ETH", "$SOL", "#crypto", "#bitcoin", "#ethereum",
+    "trading", "invest", "portfolio", "bull market", "bear market",
+    "nft", "token", "coin", "wallet", "exchange", "dex"
+]
 
 # Helpers
 def truncate_to_sentence(text: str, max_length: int) -> str:
@@ -247,11 +284,10 @@ def build_dex_reply(addr: str) -> str:
     data = fetch_data(addr)
     return format_metrics(data) + data['link']
 
-async def post_raid(tweet):
-    """Post a bullpost for $DEGEN based on the tweet"""
+async def post_crypto_raid(tweet):
+    """Post contextual $DEGEN promotion on crypto/memecoin tweets"""
     try:
         convo_id = tweet.conversation_id or tweet.id
-        history = get_thread_history(convo_id)
         
         # Get author info if available
         author_info = ""
@@ -263,53 +299,55 @@ async def post_raid(tweet):
             except:
                 pass
         
-        prompt = (
-            f"History:{history}\n"
-            f"User{author_info}: '{tweet.text}'\n"
-            "Write a one-liner bullpost for $DEGEN based on the above. "
-            f"Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. "
-            "End with NFA. No slang. High class but a little edgy like Don Draper."
-        )
+        # Create contextual $DEGEN promotion based on the tweet content
+        tweet_lower = tweet.text.lower()
+        
+        if any(term in tweet_lower for term in ["memecoin", "meme coin", "shitcoin"]):
+            prompt = f"User{author_info} posted about memecoins: '{tweet.text}'\nReply promoting $DEGEN as a solid memecoin play. Include contract {DEGEN_ADDR} and tag @ogdegenonsol. End with NFA. Be engaging and bullish like Don Draper."
+        elif any(term in tweet_lower for term in ["gem", "moonshot", "x100"]):
+            prompt = f"User{author_info} is looking for gems: '{tweet.text}'\nReply suggesting $DEGEN as a potential gem. Include contract {DEGEN_ADDR} and tag @ogdegenonsol. End with NFA. Be confident like Don Draper."
+        elif any(term in tweet_lower for term in ["pump", "moon", "lambo"]):
+            prompt = f"User{author_info} posted about pumps: '{tweet.text}'\nReply mentioning $DEGEN's potential. Include contract {DEGEN_ADDR} and tag @ogdegenonsol. End with NFA. Be optimistic like Don Draper."
+        elif any(coin in tweet.text.upper() for coin in ["$DOGE", "$SHIB", "$PEPE", "$BONK"]):
+            prompt = f"User{author_info} mentioned other memecoins: '{tweet.text}'\nReply suggesting they also check out $DEGEN. Include contract {DEGEN_ADDR} and tag @ogdegenonsol. End with NFA. Be friendly like Don Draper."
+        else:
+            prompt = f"User{author_info} posted about crypto: '{tweet.text}'\nReply naturally promoting $DEGEN. Include contract {DEGEN_ADDR} and tag @ogdegenonsol. End with NFA. Be engaging like Don Draper."
         
         msg = ask_grok(prompt)
         
-        # Ensure we have meme images available
+        # Use meme images for crypto raids
         meme_files = glob.glob("raid_images/*.jpg")
-        if not meme_files:
-            logger.warning("No meme images found in raid_images/ directory")
-            await safe_tweet(
-                text=truncate_to_sentence(msg, 240),
-                in_reply_to_tweet_id=tweet.id
-            )
-        else:
+        if meme_files:
             img = choice(meme_files)
             media_id = x_api.media_upload(img).media_id_string
-            await safe_tweet(
-                text=truncate_to_sentence(msg, 240),
-                media_id=media_id,
-                in_reply_to_tweet_id=tweet.id
-            )
+        else:
+            media_id = None
+        
+        await safe_tweet(
+            text=truncate_to_sentence(msg, 240),
+            media_id=media_id,
+            in_reply_to_tweet_id=tweet.id
+        )
         
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
-        logger.info(f"Successfully posted raid reply to tweet {tweet.id}")
+        logger.info(f"✅ Posted crypto raid reply to tweet {tweet.id}")
         
     except Exception as e:
-        logger.error(f"Error in post_raid for tweet {tweet.id}: {e}", exc_info=True)
+        logger.error(f"Error in post_crypto_raid for tweet {tweet.id}: {e}", exc_info=True)
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
 
-async def search_degen_loop():
-    """MAXIMUM AGGRESSION - raid ANY tweet containing 'degen' to promote $DEGEN"""
-    key = f"{REDIS_PREFIX}last_degen_id"
-    if not redis_client.exists(key):
-        redis_client.set(key, INITIAL_SEARCH_ID)
-        logger.info("🔥 Starting aggressive degen raiding...")
-
+async def broad_crypto_raid_loop():
+    """MAXIMUM REACH - raid memecoin and crypto tweets to promote $DEGEN"""
+    query_index = 0
+    
     while True:
         try:
-            last_id = redis_client.get(key)
+            # Rotate through different search queries for maximum coverage
+            current_query = SEARCH_QUERIES[query_index % len(SEARCH_QUERIES)]
+            query_index += 1
+            
             params = {
-                "query": "degen -is:retweet -is:reply",
-                "since_id": last_id,
+                "query": current_query,
                 "tweet_fields": ["id", "text", "conversation_id", "created_at", "author_id"],
                 "expansions": ["author_id"],
                 "user_fields": ["username", "public_metrics"],
@@ -318,9 +356,7 @@ async def search_degen_loop():
             res = await safe_search(x_client.search_recent_tweets, **params)
             
             if res and res.data:
-                newest = max(int(t.id) for t in res.data)
-                
-                # Create a mapping of user_id to user data
+                # Create user mapping
                 user_map = {}
                 if hasattr(res, 'includes') and res.includes and 'users' in res.includes:
                     for user in res.includes['users']:
@@ -340,65 +376,67 @@ async def search_degen_loop():
                     if author and hasattr(author, 'public_metrics'):
                         follower_count = author.public_metrics.get('followers_count', 0)
                     
-                    # MAXIMUM AGGRESSION - raid almost all 'degen' tweets:
+                    # BROAD TARGETING - raid crypto/memecoin tweets:
                     should_raid = False
                     
-                    # 1. Always raid tweets from accounts with 50+ followers (even lower threshold)
-                    if follower_count >= 50:
+                    # 1. Prioritize accounts with decent following (20+ followers)
+                    if follower_count >= 20:
                         should_raid = True
                         
-                    # 2. Always raid if it's a substantial tweet (not just spam)
-                    elif len(tw.text) > 30:  # Any tweet with decent content
+                    # 2. Always raid tweets mentioning other memecoins (perfect audience)
+                    elif any(coin in tw.text.upper() for coin in ["$DOGE", "$SHIB", "$PEPE", "$BONK", "$WIF"]):
                         should_raid = True
                         
-                    # 3. Skip only obvious spam/bot accounts (0 followers AND very short tweets)
-                    elif follower_count == 0 and len(tw.text) < 20:
+                    # 3. Raid substantial crypto discussions
+                    elif len(tw.text) > 50 and any(term in tw.text.lower() for term in ["crypto", "coin", "token", "blockchain"]):
+                        should_raid = True
+                        
+                    # 4. Skip very low quality accounts
+                    elif follower_count < 5:
                         should_raid = False
                         
-                    # 4. Otherwise, raid it! (maximum promotion)
+                    # 5. Otherwise raid it for maximum reach
                     else:
                         should_raid = True
                     
                     if should_raid:
                         qualified_tweets.append(tw)
                         username = author.username if author else 'unknown'
-                        logger.info(f"🎯 RAID TARGET: @{username} ({follower_count} followers): {tw.text[:50]}...")
+                        logger.info(f"🎯 CRYPTO RAID: @{username} ({follower_count} followers): {tw.text[:50]}...")
                 
-                # Process MORE qualified tweets (increased to 12 per cycle for maximum reach)
-                for tw in qualified_tweets[:12]:
+                # Process qualified tweets - increased to 15 per cycle for maximum promotion
+                for tw in qualified_tweets[:15]:
                     try:
-                        await post_raid(tw)
+                        await post_crypto_raid(tw)
                         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-                        # Very short delay for maximum promotion speed
-                        await asyncio.sleep(3)
+                        # Quick delay for rapid promotion
+                        await asyncio.sleep(2)
                     except Exception as e:
-                        logger.error(f"Error processing qualified tweet {tw.id}: {e}")
+                        logger.error(f"Error processing crypto raid {tw.id}: {e}")
                         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
                 
-                redis_client.set(key, str(newest))
-                logger.info(f"🚀 RAIDED {len(qualified_tweets[:12])} tweets out of {len(res.data)} total degen tweets")
+                logger.info(f"🚀 CRYPTO RAIDED {len(qualified_tweets[:15])} tweets using query: '{current_query[:30]}...'")
                 
             else:
-                logger.info("🔍 No new degen tweets found in this cycle")
+                logger.info(f"🔍 No results for query: '{current_query[:30]}...'")
                 
         except Exception as e:
-            logger.error(f"search_degen_loop error: {e}", exc_info=True)
+            logger.error(f"broad_crypto_raid_loop error: {e}", exc_info=True)
         
-        await asyncio.sleep(90)  # Every 90 seconds (maximum frequency for promotion)
+        await asyncio.sleep(60)  # Every minute with different search terms
 
-async def auto_like_degen_loop():
-    """MAXIMUM AGGRESSION - like almost ANY tweet containing 'degen'"""
-    key = f"{REDIS_PREFIX}last_like_id"
-    if not redis_client.exists(key):
-        redis_client.set(key, INITIAL_SEARCH_ID)
-        logger.info("💙 Starting aggressive degen liking...")
-
+async def aggressive_crypto_like_loop():
+    """MAXIMUM LIKES - like tons of crypto/memecoin content"""
+    like_query_index = 0
+    
     while True:
         try:
-            last_id = redis_client.get(key)
+            # Rotate through like queries
+            current_like_query = LIKE_QUERIES[like_query_index % len(LIKE_QUERIES)]
+            like_query_index += 1
+            
             params = {
-                "query": "degen -is:retweet",
-                "since_id": last_id,
+                "query": f"{current_like_query} -is:retweet",
                 "tweet_fields": ["id", "text", "author_id"],
                 "expansions": ["author_id"],
                 "user_fields": ["username", "public_metrics"],
@@ -407,8 +445,6 @@ async def auto_like_degen_loop():
             res = await safe_search(x_client.search_recent_tweets, **params)
             
             if res and res.data:
-                newest = max(int(t.id) for t in res.data)
-                
                 # Create user mapping
                 user_map = {}
                 if hasattr(res, 'includes') and res.includes and 'users' in res.includes:
@@ -422,40 +458,37 @@ async def auto_like_degen_loop():
                     if redis_client.sismember(f"{REDIS_PREFIX}liked_ids", tid):
                         continue
                     
-                    tweet_text_upper = tw.text.upper()
-                    if "DEGEN" in tweet_text_upper:
-                        author = user_map.get(tw.author_id)
-                        follower_count = 0
-                        if author and hasattr(author, 'public_metrics'):
-                            follower_count = author.public_metrics.get('followers_count', 0)
-                        
-                        # MAXIMUM AGGRESSION - like almost any 'degen' tweet
-                        if follower_count >= 5:  # Even lower threshold - just avoid complete spam accounts
-                            try:
-                                await safe_like(tid)
-                                redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
-                                liked_count += 1
-                                logger.info(f"👍 Liked: @{author.username if author else 'unknown'} ({follower_count} followers)")
+                    author = user_map.get(tw.author_id)
+                    follower_count = 0
+                    if author and hasattr(author, 'public_metrics'):
+                        follower_count = author.public_metrics.get('followers_count', 0)
+                    
+                    # VERY BROAD LIKING - like almost all crypto content
+                    if follower_count >= 1:  # Like from almost any real account
+                        try:
+                            await safe_like(tid)
+                            redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
+                            liked_count += 1
+                            logger.info(f"👍 Liked crypto: @{author.username if author else 'unknown'} ({follower_count} followers)")
+                            
+                            # Increased like limit to 50 per cycle
+                            if liked_count >= 50:
+                                break
                                 
-                                # Increased like limit per cycle to 40 for maximum engagement
-                                if liked_count >= 40:
-                                    break
-                                    
-                                await asyncio.sleep(1)  # Faster liking
-                            except Exception as e:
-                                logger.error(f"Error liking tweet {tid}: {e}")
-                                redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
+                            await asyncio.sleep(0.5)  # Very fast liking
+                        except Exception as e:
+                            logger.error(f"Error liking tweet {tid}: {e}")
+                            redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
                 
-                redis_client.set(key, str(newest))
-                logger.info(f"💙 Liked {liked_count} 'degen' tweets this cycle")
+                logger.info(f"💙 Liked {liked_count} '{current_like_query}' tweets")
                 
             else:
-                logger.info("💙 No new degen tweets to like in this cycle")
+                logger.info(f"💙 No tweets found for '{current_like_query}'")
                 
         except Exception as e:
-            logger.error(f"auto_like_degen_loop error: {e}", exc_info=True)
+            logger.error(f"aggressive_crypto_like_loop error: {e}", exc_info=True)
         
-        await asyncio.sleep(120)  # Every 2 minutes (maximum frequency)
+        await asyncio.sleep(90)  # Every 90 seconds with different terms
 
 async def monitor_ogdegen_loop():
     """Monitor @ogdegenonsol for new tweets and reply to ALL of them"""
@@ -546,7 +579,7 @@ async def handle_mention(tw):
 
         # 1) raid
         if re.search(r"\braid\b", txt, re.IGNORECASE):
-            await post_raid(tw)
+            await post_crypto_raid(tw)
             return
 
         # 2) Check for CA command (contract address only)
@@ -678,7 +711,7 @@ async def search_mentions_loop():
 
 async def hourly_post_loop():
     grok_prompts = [
-        "Write a positive one-sentence analytical update on $DEGEN using data from the last hour. Do not mention the contract address. No slang. High class but a little edgy like David Foster Wallace.",
+        "Write a positive one-sentence cryptic degenerate genius analytical update on $DEGEN using data from the last hour. Do not mention the contract address. No slang. High class but a little edgy like David Foster Wallace.",
         "Write a positive one-sentence cryptic message about secret tech being developed on $DEGEN's price action. Be edgy and risky. Do not mention the contract address. No slang. High class but a little edgy like Don Draper.",
         "Write a one sentence, cryptic message about $DEGEN that implies insider knowledge. Do not mention the contract address. No slang. High class but a little edgy like David Foster Wallace.",
         "Write a one sentence, cryptic comment about people who haven't bought $DEGEN yet. Do not mention the contract address. No slang. High class but a little edgy like Elon Musk.",
@@ -830,23 +863,23 @@ async def post_price_pump_tweet(price_change, estimated_sol):
 
 async def main():
     try:
-        logger.info("🤖 Starting MAXIMUM AGGRESSION $DEGEN promotion bot...")
+        logger.info("🚀 Starting BROAD CRYPTO PROMOTION bot for $DEGEN...")
         
         # Pre-mark all blocked tweets as replied to
         for tweet_id in BLOCKED_TWEET_IDS:
             redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tweet_id)
             logger.info(f"Pre-marked blocked tweet ID {tweet_id} as replied")
         
-        logger.info("🔥 MAXIMUM AGGRESSION MODE - raiding ALL 'degen' tweets...")
+        logger.info("💎 MAXIMUM REACH MODE - targeting ALL crypto/memecoin content...")
         
-        # Run all loops including the new ogdegen monitor
+        # Run all loops with the new broad targeting
         await asyncio.gather(
-            search_mentions_loop(),
-            hourly_post_loop(),
-            search_degen_loop(),           # Now much more aggressive
-            auto_like_degen_loop(),        # Now much more aggressive  
-            monitor_volume_spikes_loop(),
-            monitor_ogdegen_loop(),        # NEW: Monitor @ogdegenonsol
+            search_mentions_loop(),          # Keep existing mention handling
+            hourly_post_loop(),             # Keep existing hourly posts
+            broad_crypto_raid_loop(),       # NEW: Broad crypto raiding
+            aggressive_crypto_like_loop(),  # NEW: Aggressive crypto liking
+            monitor_volume_spikes_loop(),   # Keep volume monitoring
+            monitor_ogdegen_loop(),         # Keep ogdegen monitoring
         )
         
     except Exception as e:

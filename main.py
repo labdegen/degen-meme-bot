@@ -296,13 +296,13 @@ async def post_raid(tweet):
     except Exception as e:
         logger.error(f"Error in post_raid for tweet {tweet.id}: {e}", exc_info=True)
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
-# REPLACE your search_degen_loop function with this much more aggressive version:
 
 async def search_degen_loop():
     """MAXIMUM AGGRESSION - raid ANY tweet containing 'degen' to promote $DEGEN"""
     key = f"{REDIS_PREFIX}last_degen_id"
     if not redis_client.exists(key):
         redis_client.set(key, INITIAL_SEARCH_ID)
+        logger.info("🔥 Starting aggressive degen raiding...")
 
     while True:
         try:
@@ -313,7 +313,7 @@ async def search_degen_loop():
                 "tweet_fields": ["id", "text", "conversation_id", "created_at", "author_id"],
                 "expansions": ["author_id"],
                 "user_fields": ["username", "public_metrics"],
-                "max_results": 100  # Increased to get more candidates
+                "max_results": 100
             }
             res = await safe_search(x_client.search_recent_tweets, **params)
             
@@ -326,7 +326,6 @@ async def search_degen_loop():
                     for user in res.includes['users']:
                         user_map[user.id] = user
                 
-                # MUCH MORE AGGRESSIVE FILTERING
                 qualified_tweets = []
                 for tw in res.data:
                     tid = str(tw.id)
@@ -379,25 +378,97 @@ async def search_degen_loop():
                 redis_client.set(key, str(newest))
                 logger.info(f"🚀 RAIDED {len(qualified_tweets[:12])} tweets out of {len(res.data)} total degen tweets")
                 
+            else:
+                logger.info("🔍 No new degen tweets found in this cycle")
+                
         except Exception as e:
             logger.error(f"search_degen_loop error: {e}", exc_info=True)
         
         await asyncio.sleep(90)  # Every 90 seconds (maximum frequency for promotion)
 
-# ADD this new function to monitor @ogdegenonsol tweets:
+async def auto_like_degen_loop():
+    """MAXIMUM AGGRESSION - like almost ANY tweet containing 'degen'"""
+    key = f"{REDIS_PREFIX}last_like_id"
+    if not redis_client.exists(key):
+        redis_client.set(key, INITIAL_SEARCH_ID)
+        logger.info("💙 Starting aggressive degen liking...")
+
+    while True:
+        try:
+            last_id = redis_client.get(key)
+            params = {
+                "query": "degen -is:retweet",
+                "since_id": last_id,
+                "tweet_fields": ["id", "text", "author_id"],
+                "expansions": ["author_id"],
+                "user_fields": ["username", "public_metrics"],
+                "max_results": 100
+            }
+            res = await safe_search(x_client.search_recent_tweets, **params)
+            
+            if res and res.data:
+                newest = max(int(t.id) for t in res.data)
+                
+                # Create user mapping
+                user_map = {}
+                if hasattr(res, 'includes') and res.includes and 'users' in res.includes:
+                    for user in res.includes['users']:
+                        user_map[user.id] = user
+                
+                liked_count = 0
+                for tw in res.data:
+                    tid = str(tw.id)
+                    
+                    if redis_client.sismember(f"{REDIS_PREFIX}liked_ids", tid):
+                        continue
+                    
+                    tweet_text_upper = tw.text.upper()
+                    if "DEGEN" in tweet_text_upper:
+                        author = user_map.get(tw.author_id)
+                        follower_count = 0
+                        if author and hasattr(author, 'public_metrics'):
+                            follower_count = author.public_metrics.get('followers_count', 0)
+                        
+                        # MAXIMUM AGGRESSION - like almost any 'degen' tweet
+                        if follower_count >= 5:  # Even lower threshold - just avoid complete spam accounts
+                            try:
+                                await safe_like(tid)
+                                redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
+                                liked_count += 1
+                                logger.info(f"👍 Liked: @{author.username if author else 'unknown'} ({follower_count} followers)")
+                                
+                                # Increased like limit per cycle to 40 for maximum engagement
+                                if liked_count >= 40:
+                                    break
+                                    
+                                await asyncio.sleep(1)  # Faster liking
+                            except Exception as e:
+                                logger.error(f"Error liking tweet {tid}: {e}")
+                                redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
+                
+                redis_client.set(key, str(newest))
+                logger.info(f"💙 Liked {liked_count} 'degen' tweets this cycle")
+                
+            else:
+                logger.info("💙 No new degen tweets to like in this cycle")
+                
+        except Exception as e:
+            logger.error(f"auto_like_degen_loop error: {e}", exc_info=True)
+        
+        await asyncio.sleep(120)  # Every 2 minutes (maximum frequency)
 
 async def monitor_ogdegen_loop():
     """Monitor @ogdegenonsol for new tweets and reply to ALL of them"""
     key = f"{REDIS_PREFIX}last_ogdegen_id"
     if not redis_client.exists(key):
         redis_client.set(key, INITIAL_SEARCH_ID)
-        logger.info(f"Initialized ogdegen monitoring")
+        logger.info(f"🎯 Starting @ogdegenonsol monitoring")
 
     while True:
         try:
             last_id = redis_client.get(key)
             params = {
-                "query": "from:ogdegenonsol -is:retweet",  # Only original tweets from @ogdegenonsol
+                "query": "from:ogdegenonsol -is:retweet",
                 "since_id": last_id,
                 "tweet_fields": ["id", "text", "conversation_id", "created_at", "author_id"],
                 "max_results": 10
@@ -451,80 +522,13 @@ async def monitor_ogdegen_loop():
                 redis_client.set(key, str(newest))
                 logger.info(f"🎯 Monitored @ogdegenonsol - processed {len(res.data)} tweets")
                 
+            else:
+                logger.info("🎯 No new @ogdegenonsol tweets")
+                
         except Exception as e:
             logger.error(f"monitor_ogdegen_loop error: {e}", exc_info=True)
         
         await asyncio.sleep(60)  # Check every minute for new ogdegen tweets
-
-# ALSO modify the auto_like_degen_loop to be more aggressive:
-
-async def auto_like_degen_loop():
-    """MAXIMUM AGGRESSION - like almost ANY tweet containing 'degen'"""
-    key = f"{REDIS_PREFIX}last_like_id"
-    if not redis_client.exists(key):
-        redis_client.set(key, INITIAL_SEARCH_ID)
-
-    while True:
-        try:
-            last_id = redis_client.get(key)
-            params = {
-                "query": "degen -is:retweet",
-                "since_id": last_id,
-                "tweet_fields": ["id", "text", "author_id"],
-                "expansions": ["author_id"],
-                "user_fields": ["username", "public_metrics"],
-                "max_results": 100  # Increased from 50
-            }
-            res = await safe_search(x_client.search_recent_tweets, **params)
-            
-            if res and res.data:
-                newest = max(int(t.id) for t in res.data)
-                
-                # Create user mapping
-                user_map = {}
-                if hasattr(res, 'includes') and res.includes and 'users' in res.includes:
-                    for user in res.includes['users']:
-                        user_map[user.id] = user
-                
-                liked_count = 0
-                for tw in res.data:
-                    tid = str(tw.id)
-                    
-                    if redis_client.sismember(f"{REDIS_PREFIX}liked_ids", tid):
-                        continue
-                    
-                    tweet_text_upper = tw.text.upper()
-                    if "DEGEN" in tweet_text_upper:
-                        author = user_map.get(tw.author_id)
-                        follower_count = 0
-                        if author and hasattr(author, 'public_metrics'):
-                            follower_count = author.public_metrics.get('followers_count', 0)
-                        
-                        # MAXIMUM AGGRESSION - like almost any 'degen' tweet
-                        if follower_count >= 5:  # Even lower threshold - just avoid complete spam accounts
-                            try:
-                                await safe_like(tid)
-                                redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
-                                liked_count += 1
-                                logger.info(f"👍 Liked: @{author.username if author else 'unknown'} ({follower_count} followers)")
-                                
-                                # Increased like limit per cycle to 40 for maximum engagement
-                                if liked_count >= 40:
-                                    break
-                                    
-                                await asyncio.sleep(1)  # Faster liking
-                            except Exception as e:
-                                logger.error(f"Error liking tweet {tid}: {e}")
-                                redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
-                
-                redis_client.set(key, str(newest))
-                logger.info(f"💙 Liked {liked_count} 'degen' tweets this cycle")
-                
-        except Exception as e:
-            logger.error(f"auto_like_degen_loop error: {e}", exc_info=True)
-        
-        await asyncio.sleep(120)  # Every 2 minutes (maximum frequency)
-
 
 async def handle_mention(tw):
     try:

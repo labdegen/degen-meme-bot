@@ -315,6 +315,10 @@ async def post_crypto_raid(tweet):
         
         msg = ask_grok(prompt)
         
+        # ALWAYS ensure contract address is included
+        if DEGEN_ADDR not in msg:
+            msg = f"{msg}\n\nCA: {DEGEN_ADDR}"
+        
         # Use meme images for crypto raids
         meme_files = glob.glob("raid_images/*.jpg")
         if meme_files:

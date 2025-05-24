@@ -82,7 +82,6 @@ RATE_WINDOW = 900
 MENTIONS_LIMIT = 10
 TWEETS_LIMIT = 50
 SEARCH_LIMIT = 10  # Limit for search API calls
-LIKE_LIMIT = 50 
 mentions_timestamps = deque()
 tweet_timestamps = deque()
 search_timestamps = deque()
@@ -248,59 +247,32 @@ def build_dex_reply(addr: str) -> str:
 async def post_raid(tweet):
     """
     Include thread history in raid prompt and post a bullpost with a random meme.
-    Enhanced with better error handling and logging.
     """
     try:
         convo_id = tweet.conversation_id or tweet.id
         history = get_thread_history(convo_id)
-        
-        # Get author info if available
-        author_info = ""
-        if hasattr(tweet, 'author_id'):
-            try:
-                user_info = x_client.get_user(id=tweet.author_id)
-                if user_info and user_info.data:
-                    author_info = f" (from @{user_info.data.username})"
-            except:
-                pass
-        
         prompt = (
             f"History:{history}\n"
-            f"User{author_info}: '{tweet.text}'\n"
+            f"User: '{tweet.text}'\n"
             "Write a one-liner bullpost for $DEGEN based on the above. "
-            f"Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. "
-            "End with NFA. No slang. High class but a little edgy like Don Draper."
+            f"Tag @ogdegenonsol and include contract address {DEGEN_ADDR}. End with NFA. No slang. High class but a little edgy like Don Draper."
         )
-        
         msg = ask_grok(prompt)
-        
-        # Ensure we have meme images available
-        meme_files = glob.glob("raid_images/*.jpg")
-        if not meme_files:
-            logger.warning("No meme images found in raid_images/ directory")
-            # Post without image if no memes available
-            await safe_tweet(
-                text=truncate_to_sentence(msg, 240),
-                in_reply_to_tweet_id=tweet.id
-            )
-        else:
-            img = choice(meme_files)
-            media_id = x_api.media_upload(img).media_id_string
-            await safe_tweet(
-                text=truncate_to_sentence(msg, 240),
-                media_id=media_id,
-                in_reply_to_tweet_id=tweet.id
-            )
-        
+        img = choice(glob.glob("raid_images/*.jpg"))
+        media_id = x_api.media_upload(img).media_id_string
+        await safe_tweet(
+            text=truncate_to_sentence(msg, 240),
+            media_id=media_id,
+            in_reply_to_tweet_id=tweet.id
+        )
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
-        logger.info(f"Successfully posted raid reply to tweet {tweet.id}")
-        
     except Exception as e:
         logger.error(f"Error in post_raid for tweet {tweet.id}: {e}", exc_info=True)
         # Mark as replied to avoid getting stuck
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
+
 async def search_degen_loop():
-    """Enhanced search for 'degen' tweets from users with 500+ followers"""
+    # initialize last seen ID
     key = f"{REDIS_PREFIX}last_degen_id"
     if not redis_client.exists(key):
         redis_client.set(key, INITIAL_SEARCH_ID)
@@ -309,61 +281,27 @@ async def search_degen_loop():
         try:
             last_id = redis_client.get(key)
             params = {
-                "query": "degen -is:retweet -is:reply",  # Added -is:reply to focus on original tweets
+                "query": "degen -is:retweet",
                 "since_id": last_id,
-                "tweet_fields": ["id", "text", "conversation_id", "created_at", "author_id"],
-                "expansions": ["author_id"],
-                "user_fields": ["username", "public_metrics"],  # Include public_metrics for follower count
-                "max_results": 50  # Increased to get more potential candidates
+                "tweet_fields": ["id", "text", "conversation_id", "created_at"],
+                "max_results": 10
             }
             res = await safe_search(x_client.search_recent_tweets, **params)
-            
             if res and res.data:
                 newest = max(int(t.id) for t in res.data)
-                
-                # Create a mapping of user_id to user data for follower filtering
-                user_map = {}
-                if hasattr(res, 'includes') and res.includes and 'users' in res.includes:
-                    for user in res.includes['users']:
-                        user_map[user.id] = user
-                
-                qualified_tweets = []
                 for tw in res.data:
                     tid = str(tw.id)
-                    
-                    # Skip blocked tweets and already replied tweets
                     if tid in BLOCKED_TWEET_IDS or redis_client.sismember(f"{REDIS_PREFIX}replied_ids", tid):
                         continue
-                    
-                    # Check follower count
-                    author = user_map.get(tw.author_id)
-                    if author and hasattr(author, 'public_metrics'):
-                        follower_count = author.public_metrics.get('followers_count', 0)
-                        if follower_count >= 500:
-                            qualified_tweets.append(tw)
-                            logger.info(f"Found qualified tweet from @{author.username} ({follower_count} followers): {tw.text[:50]}...")
-                
-                # Process qualified tweets (limit to avoid rate limits)
-                for tw in qualified_tweets[:3]:  # Process max 3 per cycle to stay under limits
-                    try:
-                        await post_raid(tw)
-                        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-                        # Small delay between replies
-                        await asyncio.sleep(10)
-                    except Exception as e:
-                        logger.error(f"Error processing qualified tweet {tw.id}: {e}")
-                        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-                
+                    await post_raid(tw)
+                    # mark it so we don’t double-reply
+                    redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tid)
                 redis_client.set(key, str(newest))
-                logger.info(f"Processed {len(qualified_tweets)} qualified tweets out of {len(res.data)} total")
-                
         except Exception as e:
             logger.error(f"search_degen_loop error: {e}", exc_info=True)
-        
-        await asyncio.sleep(240)  # Every 4 minutes (reduced frequency to stay under limits)
+        await asyncio.sleep(180)  # every 3 minutes
 
 async def auto_like_degen_loop():
-    """Enhanced auto-like for 'degen' tweets (case insensitive) from users with decent following"""
     key = f"{REDIS_PREFIX}last_like_id"
     if not redis_client.exists(key):
         redis_client.set(key, INITIAL_SEARCH_ID)
@@ -372,66 +310,24 @@ async def auto_like_degen_loop():
         try:
             last_id = redis_client.get(key)
             params = {
-                "query": "degen -is:retweet",  # Case insensitive search for 'degen'
+                "query": "DEGEN -is:retweet",
                 "since_id": last_id,
-                "tweet_fields": ["id", "text", "author_id"],
-                "expansions": ["author_id"],
-                "user_fields": ["username", "public_metrics"],
-                "max_results": 50
+                "tweet_fields": ["id", "text"],
+                "max_results": 10
             }
             res = await safe_search(x_client.search_recent_tweets, **params)
-            
             if res and res.data:
                 newest = max(int(t.id) for t in res.data)
-                
-                # Create user mapping for follower filtering
-                user_map = {}
-                if hasattr(res, 'includes') and res.includes and 'users' in res.includes:
-                    for user in res.includes['users']:
-                        user_map[user.id] = user
-                
-                liked_count = 0
                 for tw in res.data:
                     tid = str(tw.id)
-                    
-                    # Skip if already liked
-                    if redis_client.sismember(f"{REDIS_PREFIX}liked_ids", tid):
-                        continue
-                    
-                    # Check if tweet contains degen (case insensitive) or $DEGEN
-                    tweet_text_upper = tw.text.upper()
-                    if "DEGEN" in tweet_text_upper:
-                        # Optional: filter by follower count for likes too (lower threshold)
-                        author = user_map.get(tw.author_id)
-                        follower_count = 0
-                        if author and hasattr(author, 'public_metrics'):
-                            follower_count = author.public_metrics.get('followers_count', 0)
-                        
-                        # Like tweets from users with 100+ followers (lower threshold for likes)
-                        if follower_count >= 100:
-                            try:
-                                await safe_like(tid)
-                                redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
-                                liked_count += 1
-                                logger.info(f"Liked tweet from @{author.username if author else 'unknown'} ({follower_count} followers)")
-                                
-                                # Limit likes per cycle to avoid hitting rate limits
-                                if liked_count >= 10:
-                                    break
-                                    
-                                # Small delay between likes
-                                await asyncio.sleep(2)
-                            except Exception as e:
-                                logger.error(f"Error liking tweet {tid}: {e}")
-                                redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
-                
+                    if "$DEGEN" in tw.text.upper() and not redis_client.sismember(f"{REDIS_PREFIX}liked_ids", tid):
+                        await safe_like(tid)
+                        redis_client.sadd(f"{REDIS_PREFIX}liked_ids", tid)
                 redis_client.set(key, str(newest))
-                logger.info(f"Liked {liked_count} tweets this cycle")
-                
         except Exception as e:
             logger.error(f"auto_like_degen_loop error: {e}", exc_info=True)
-        
-        await asyncio.sleep(360)  # Every 6 minutes (reduced frequency for likes)
+        await asyncio.sleep(300)  # every 5 minutes
+
 
 async def handle_mention(tw):
     try:

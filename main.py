@@ -15,8 +15,6 @@ import http.client
 import sys
 import random
 
-# Removed liking functionality - no longer needed
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -130,8 +128,6 @@ SEARCH_QUERIES = [
     "fud -is:retweet -is:reply"
 ]
 
-# Removed LIKE_QUERIES - no longer liking tweets
-
 # Helpers
 def truncate_to_sentence(text: str, max_length: int) -> str:
     if len(text) <= max_length:
@@ -150,6 +146,14 @@ def clean_reply_text(text: str) -> str:
     # Clean up extra spaces
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
     return cleaned
+
+def fix_degen_spacing(text: str) -> str:
+    """Ensure $DEGEN has proper spacing for cashtag to work"""
+    # Fix common spacing issues around $DEGEN
+    text = re.sub(r'([^\s])(\$DEGEN)', r'\1 \2', text)  # Add space before if missing
+    text = re.sub(r'(\$DEGEN)([^\s\.\,\!\?])', r'\1 \2', text)  # Add space after if missing  
+    text = re.sub(r'-\s*\$DEGEN', r' $DEGEN', text)  # Fix "-$DEGEN" to " $DEGEN"
+    return text
 
 # Thread memory helpers
 def get_thread_key(cid):
@@ -235,8 +239,9 @@ async def safe_search(fn, *args, **kwargs):
     return await safe_api_call(fn, search_timestamps, SEARCH_LIMIT, *args, **kwargs)
 
 async def safe_tweet(text: str, media_id=None, **kwargs):
-    # CLEAN ALL @MENTIONS FROM TEXT
+    # CLEAN ALL @MENTIONS FROM TEXT AND FIX $DEGEN SPACING
     cleaned_text = clean_reply_text(text)
+    cleaned_text = fix_degen_spacing(cleaned_text)
     
     return await safe_api_call(
         lambda t, m, **kw: x_client.create_tweet(text=t, media_ids=[m] if m else None, **kw),
@@ -246,8 +251,6 @@ async def safe_tweet(text: str, media_id=None, **kwargs):
         media_id, 
         **kwargs
     )
-
-# Removed safe_like function - no longer liking tweets
 
 # Rate limit monitoring
 async def check_rate_limit_status():
@@ -287,12 +290,15 @@ def fetch_data(addr: str) -> dict:
         return {}
 
 def format_metrics(d: dict) -> str:
-    """Format DEX data with icons - EXACTLY as original"""
+    """Format DEX data EXACTLY like the image - with proper spacing"""
+    if not d:
+        return "🚀 DEGEN | Data loading...\nMC Loading... | Vol24 Loading...\n1h Loading... | 24h Loading..."
+    
     return (
         f"🚀 {d['symbol']} | ${d['price_usd']:,.6f}\n"
         f"MC ${d['market_cap']:,.0f} | Vol24 ${d['volume_usd']:,.0f}\n"
         f"1h {'🟢' if d['change_1h']>=0 else '🔴'}{d['change_1h']:+.2f}% | "
-        f"24h {'🟢' if d['change_24h']>=0 else '🔴'}{d['change_24h']:+.2f}%\n"
+        f"24h {'🟢' if d['change_24h']>=0 else '🔴'}{d['change_24h']:+.2f}%"
     )
 
 def lookup_address(token: str) -> str:
@@ -318,7 +324,7 @@ def build_dex_reply(addr: str) -> str:
         return f"Data temporarily unavailable\n\nhttps://dexscreener.com/solana/{addr}"
     
     metrics = format_metrics(data)
-    return metrics.rstrip() + "\n\n" + data['link']
+    return f"{metrics}\n\n{data['link']}"
 
 async def post_crypto_raid(tweet):
     """Post contextual $DEGEN promotion - KEEP YOUR ORIGINAL PROMPTS"""
@@ -360,7 +366,7 @@ async def post_crypto_raid(tweet):
         
         # Try to use meme images occasionally
         media_id = None
-        use_image = random.random() < 0.2  # Reduced to 20% chance
+        use_image = random.random() < 0.2  # 20% chance
         
         if use_image:
             try:
@@ -459,7 +465,7 @@ async def broad_crypto_raid_loop():
                         logger.info(f"🎯 CRYPTO RAID: @{username} ({follower_count} followers): {tw.text[:50]}...")
                 
                 # Process FEWER qualified tweets - SUSTAINABLE RATE
-                for tw in qualified_tweets[:3]:  # Only 3 per cycle (was 5)
+                for tw in qualified_tweets[:3]:  # Only 3 per cycle
                     try:
                         await post_crypto_raid(tw)
                         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
@@ -475,9 +481,7 @@ async def broad_crypto_raid_loop():
         except Exception as e:
             logger.error(f"broad_crypto_raid_loop error: {e}", exc_info=True)
         
-        await asyncio.sleep(600)  # Every 10 minutes (was 5) - MORE SUSTAINABLE
-
-# Removed aggressive_crypto_like_loop - no longer liking tweets
+        await asyncio.sleep(600)  # Every 10 minutes - SUSTAINABLE
 
 async def monitor_ogdegen_loop():
     """Monitor @ogdegenonsol for new tweets and reply to ALL of them"""
@@ -520,9 +524,10 @@ async def monitor_ogdegen_loop():
                         
                         msg = ask_grok(prompt)
                         
-                        # Always include contract address
-                        if DEGEN_ADDR not in msg:
-                            msg = f"{msg}\n\nCA: {DEGEN_ADDR}"
+                        # Clean and always add contract address at end
+                        msg = msg.replace(f"CA: {DEGEN_ADDR}", "").replace(f"ca: {DEGEN_ADDR}", "").strip()
+                        msg = msg.replace(f"\n{DEGEN_ADDR}", "").replace(DEGEN_ADDR, "").strip()
+                        msg = f"{msg}\n\nCA: {DEGEN_ADDR}"
                         
                         # Use meme for ogdegen replies (30% chance)
                         media_id = None
@@ -557,7 +562,7 @@ async def monitor_ogdegen_loop():
         except Exception as e:
             logger.error(f"monitor_ogdegen_loop error: {e}", exc_info=True)
         
-        await asyncio.sleep(120)  # Check every 2 minutes (was 1)
+        await asyncio.sleep(120)  # Check every 2 minutes
 
 async def handle_mention(tw):
     """KEEP YOUR ORIGINAL MENTION HANDLING with ca, dex, raid commands"""
@@ -708,10 +713,10 @@ async def search_mentions_loop():
         except Exception as e:
             logger.error(f"Search mentions loop error: {e}", exc_info=True)
         
-        await asyncio.sleep(300)  # Every 5 minutes (was 3)
+        await asyncio.sleep(300)  # Every 5 minutes
 
 async def hourly_post_loop():
-    """KEEP YOUR ORIGINAL HOURLY POSTS with Don Draper/DFW prompts"""
+    """HOURLY POSTS - EXACT FORMAT MATCHING THE IMAGE"""
     grok_prompts = [
         "Write a positive one-sentence analytical update on $DEGEN using data from the last hour. Do not mention the contract address. No slang. High class but a little edgy like David Foster Wallace.",
         "Write a positive one-sentence cryptic message about secret tech being developed on $DEGEN's price action. Be edgy and risky. Do not mention the contract address. No slang. High class but a little edgy like Don Draper.",
@@ -732,13 +737,13 @@ async def hourly_post_loop():
             selected_prompt = grok_prompts[hour_counter % len(grok_prompts)]
             raw = ask_grok(selected_prompt).strip()
 
-            tweet = (
-                metrics.rstrip() +
-                "\n\n" +
-                raw +
-                "\n\n" +
-                dex_link
-            )
+            # EXACT FORMAT FROM THE IMAGE:
+            # 1. DEX metrics (with icons)
+            # 2. Blank line
+            # 3. Grok sentence  
+            # 4. Blank line
+            # 5. Link (for preview image)
+            tweet = f"{metrics}\n\n{raw}\n\n{dex_link}"
 
             last = redis_client.get(f"{REDIS_PREFIX}last_hourly_post")
             if tweet != last:
@@ -874,7 +879,7 @@ async def post_price_pump_tweet(price_change, estimated_sol):
 async def main():
     try:
         logger.info("🚀 Starting CRYPTO PROMOTION bot for $DEGEN...")
-        logger.info("✅ Fixed: No @mentions in replies, no liking, sustainable raid rates")
+        logger.info("✅ Fixed: No @mentions in replies, no liking, proper $DEGEN spacing, CA in raids")
         
         # Pre-mark all blocked tweets as replied to
         for tweet_id in BLOCKED_TWEET_IDS:
@@ -886,7 +891,7 @@ async def main():
         # Run all loops - NO LIKING
         await asyncio.gather(
             search_mentions_loop(),          # Keep mention handling with ca/dex/raid commands
-            hourly_post_loop(),             # Keep your original hourly posts
+            hourly_post_loop(),             # EXACT format as image 
             broad_crypto_raid_loop(),       # Reduced: 3 raids every 10 minutes
             monitor_volume_spikes_loop(),   # Keep volume monitoring
             monitor_ogdegen_loop(),         # Keep ogdegen monitoring

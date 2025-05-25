@@ -186,7 +186,7 @@ def ask_grok(prompt: str) -> str:
         logger.warning(f"Grok error: {e}")
         return "Unable to provide an update at this time."
 
-# FIXED rate limiting
+# FIXED rate limiting with better error handling
 async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
     now = time.time()
     while timestamps_queue and now - timestamps_queue[0] > RATE_WINDOW:
@@ -194,29 +194,41 @@ async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
     
     if len(timestamps_queue) >= limit:
         sleep_time = RATE_WINDOW - (now - timestamps_queue[0]) + 1
-        logger.info(f"Rate limit reached, sleeping for {sleep_time:.1f}s")
+        logger.info(f"⏳ Rate limit reached, sleeping for {sleep_time:.1f}s")
         await asyncio.sleep(sleep_time)
     
-    try:
-        result = fn(*args, **kwargs)
-        timestamps_queue.append(time.time())
-        return result
-    except (requests.exceptions.ConnectionError, http.client.RemoteDisconnected) as e:
-        logger.warning(f"Network error during API call: {e}. Retrying in 5s…")
-        await asyncio.sleep(5)
-        return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
-    except tweepy.TooManyRequests as e:
-        reset = int(e.response.headers.get('x-rate-limit-reset', time.time()+RATE_WINDOW))
-        sleep_time = reset - time.time() + 1
-        logger.warning(f"Twitter rate limit hit, sleeping for {sleep_time:.1f}s")
-        await asyncio.sleep(sleep_time)
-        return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
-    except tweepy.BadRequest as e:
-        logger.error(f"Bad request: {e}")
-        raise e
-    except Exception as e:
-        logger.error(f"API call error: {e}", exc_info=True)
-        raise e
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            result = fn(*args, **kwargs)
+            timestamps_queue.append(time.time())
+            return result
+        except (requests.exceptions.ConnectionError, http.client.RemoteDisconnected) as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"🔌 Network error (attempt {attempt + 1}): {e}. Retrying in 5s...")
+                await asyncio.sleep(5)
+                continue
+            else:
+                logger.error(f"❌ Network error after {max_retries} attempts: {e}")
+                raise
+        except tweepy.TooManyRequests as e:
+            reset = int(e.response.headers.get('x-rate-limit-reset', time.time()+RATE_WINDOW))
+            sleep_time = reset - time.time() + 10
+            logger.warning(f"🚫 Twitter rate limit hit, sleeping for {sleep_time:.1f}s")
+            await asyncio.sleep(sleep_time)
+            # Don't retry immediately, let the next cycle handle it
+            raise
+        except tweepy.BadRequest as e:
+            logger.error(f"❌ Bad request: {e}")
+            raise e
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"⚠️ API error (attempt {attempt + 1}): {e}. Retrying...")
+                await asyncio.sleep(2)
+                continue
+            else:
+                logger.error(f"❌ API call failed after {max_retries} attempts: {e}")
+                raise e
 
 async def safe_search(fn, *args, **kwargs):
     return await safe_api_call(fn, search_timestamps, SEARCH_LIMIT, *args, **kwargs)
@@ -353,6 +365,10 @@ async def post_raid(tweet):
 
 async def search_degen_loop():
     """Search for 'degen' mentions and raid them - CONTROLLED"""
+    # Startup delay to avoid immediate rate limits
+    await asyncio.sleep(30)
+    logger.info("🎯 Starting degen search loop...")
+    
     key = f"{REDIS_PREFIX}last_degen_id"
     if not redis_client.exists(key):
         redis_client.set(key, INITIAL_SEARCH_ID)
@@ -393,6 +409,10 @@ async def search_degen_loop():
 
 async def controlled_crypto_raid_loop():
     """CONTROLLED crypto raiding - Quality over quantity"""
+    # Startup delay to avoid immediate rate limits
+    await asyncio.sleep(60)
+    logger.info("🚀 Starting crypto raid loop...")
+    
     query_index = 0
     
     while True:
@@ -558,6 +578,10 @@ async def handle_mention(tw):
 
 async def search_mentions_loop():
     """Search for @mentions - WORKING VERSION"""
+    # Startup delay to avoid immediate rate limits
+    await asyncio.sleep(5)
+    logger.info("🔍 Starting mentions search loop...")
+    
     if not redis_client.exists(f"{REDIS_PREFIX}last_search_id"):
         redis_client.set(f"{REDIS_PREFIX}last_search_id", INITIAL_SEARCH_ID)
     
@@ -600,6 +624,10 @@ async def search_mentions_loop():
 
 async def hourly_post_loop():
     """Hourly market updates"""
+    # Startup delay to avoid immediate rate limits
+    await asyncio.sleep(15)
+    logger.info("📊 Starting hourly post loop...")
+    
     grok_prompts = [
         "Write a positive one-sentence analytical update on $DEGEN using data from the last hour. Do not mention the contract address. No slang. High class but a little edgy like David Foster Wallace.",
         "Write a positive one-sentence cryptic message about secret tech being developed on $DEGEN's price action. Be edgy and risky. Do not mention the contract address. No slang. High class but a little edgy like Don Draper.",
@@ -641,24 +669,47 @@ async def hourly_post_loop():
         
         await asyncio.sleep(3600)
 
+async def check_rate_limits():
+    """Check current rate limit status on startup"""
+    try:
+        # Make a simple API call to check limits
+        me = x_client.get_me()
+        logger.info("✅ API connection verified - rate limits OK")
+        return True
+    except tweepy.TooManyRequests as e:
+        reset_time = int(e.response.headers.get('x-rate-limit-reset', time.time() + 900))
+        wait_time = reset_time - time.time() + 10
+        logger.warning(f"⚠️ Rate limits exhausted on startup. Waiting {wait_time:.1f}s before starting...")
+        await asyncio.sleep(wait_time)
+        return False
+    except Exception as e:
+        logger.error(f"❌ API check failed: {e}")
+        return False
+
 async def main():
     try:
         logger.info("🚀 Starting CONTROLLED DEGEN Bot...")
         logger.info("✅ Conservative rate limits: Max 2 raids per 10 minutes")
+        
+        # Check rate limits before starting
+        logger.info("🔍 Checking API rate limits...")
+        while not await check_rate_limits():
+            logger.info("⏳ Retrying rate limit check...")
+            await asyncio.sleep(60)
         
         # Pre-mark blocked tweets
         for tweet_id in BLOCKED_TWEET_IDS:
             redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tweet_id)
             logger.info(f"Pre-marked blocked tweet ID {tweet_id}")
         
-        logger.info("💎 Starting bot functions...")
+        logger.info("💎 Starting bot functions with staggered delays...")
         
         # Run controlled loops
         await asyncio.gather(
-            search_mentions_loop(),         # Handle @mentions (PRIORITY)
-            hourly_post_loop(),            # Hourly market updates
-            search_degen_loop(),           # Controlled degen raiding
-            controlled_crypto_raid_loop(), # Controlled crypto raiding
+            search_mentions_loop(),         # Handle @mentions (PRIORITY) - starts after 5s
+            hourly_post_loop(),            # Hourly market updates - starts after 15s
+            search_degen_loop(),           # Controlled degen raiding - starts after 30s
+            controlled_crypto_raid_loop(), # Controlled crypto raiding - starts after 60s
         )
         
     except Exception as e:

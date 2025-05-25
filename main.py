@@ -94,6 +94,35 @@ search_timestamps = deque()
 current_time_ms = int(time.time() * 1000) - 1728000000
 INITIAL_SEARCH_ID = str((current_time_ms << 22))
 
+# BROAD SEARCH TERMS FOR CRYPTO RAIDING
+SEARCH_QUERIES = [
+    "memecoin -is:retweet -is:reply",
+    "meme coin -is:retweet -is:reply", 
+    "shitcoin -is:retweet -is:reply",
+    "altcoin gem -is:retweet -is:reply",
+    "moonshot -is:retweet -is:reply",
+    "crypto pump -is:retweet -is:reply",
+    "solana gem -is:retweet -is:reply",
+    "#memecoin -is:retweet -is:reply",
+    "#altcoin -is:retweet -is:reply",
+    "buy the dip -is:retweet -is:reply",
+    "diamond hands -is:retweet -is:reply",
+    "hodl -is:retweet -is:reply",
+    "$DOGE OR $SHIB OR $PEPE -is:retweet -is:reply",
+    "$BONK OR $WIF OR $FLOKI -is:retweet -is:reply",
+    "ape into -is:retweet -is:reply",
+    "crypto twitter -is:retweet -is:reply",
+    "good entry -is:retweet -is:reply",
+    "accumulating -is:retweet -is:reply",
+    "bullish on -is:retweet -is:reply",
+    "next gem -is:retweet -is:reply",
+    "x100 -is:retweet -is:reply",
+    "to the moon -is:retweet -is:reply",
+    "paper hands -is:retweet -is:reply",
+    "wagmi -is:retweet -is:reply",
+    "fud -is:retweet -is:reply"
+]
+
 # Helpers
 def truncate_to_sentence(text: str, max_length: int) -> str:
     if len(text) <= max_length:
@@ -322,7 +351,154 @@ async def post_raid(tweet):
         logger.error(f"Error in post_raid for tweet {tweet.id}: {e}", exc_info=True)
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
 
-async def search_degen_loop():
+async def post_crypto_raid(tweet):
+    """Post contextual $DEGEN promotion on crypto/memecoin tweets"""
+    try:
+        convo_id = tweet.conversation_id or tweet.id
+        
+        # Get author info if available
+        author_info = ""
+        if hasattr(tweet, 'author_id'):
+            try:
+                user_info = x_client.get_user(id=tweet.author_id)
+                if user_info and user_info.data:
+                    author_info = f" (from @{user_info.data.username})"
+            except:
+                pass
+        
+        # Create contextual $DEGEN promotion based on the tweet content
+        tweet_lower = tweet.text.lower()
+        
+        if any(term in tweet_lower for term in ["memecoin", "meme coin", "shitcoin"]):
+            prompt = f"User{author_info} posted about memecoins: '{tweet.text}'\nReply promoting $DEGEN as a solid memecoin play. Include contract {DEGEN_ADDR} and tag @ogdegenonsol. End with NFA. Be engaging and bullish like Don Draper."
+        elif any(term in tweet_lower for term in ["gem", "moonshot", "x100"]):
+            prompt = f"User{author_info} is looking for gems: '{tweet.text}'\nReply suggesting $DEGEN as a potential gem. Include contract {DEGEN_ADDR} and tag @ogdegenonsol. End with NFA. Be confident like Don Draper."
+        elif any(term in tweet_lower for term in ["pump", "moon", "lambo"]):
+            prompt = f"User{author_info} posted about pumps: '{tweet.text}'\nReply mentioning $DEGEN's potential. Include contract {DEGEN_ADDR} and tag @ogdegenonsol. End with NFA. Be optimistic like Don Draper."
+        elif any(coin in tweet.text.upper() for coin in ["$DOGE", "$SHIB", "$PEPE", "$BONK"]):
+            prompt = f"User{author_info} mentioned other memecoins: '{tweet.text}'\nReply suggesting they also check out $DEGEN. Include contract {DEGEN_ADDR} and tag @ogdegenonsol. End with NFA. Be friendly like Don Draper."
+        else:
+            prompt = f"User{author_info} posted about crypto: '{tweet.text}'\nReply naturally promoting $DEGEN. Include contract {DEGEN_ADDR} and tag @ogdegenonsol. End with NFA. Be engaging like Don Draper."
+        
+        msg = ask_grok(prompt)
+        
+        # FORCE $DEGEN to be included
+        if "$DEGEN" not in msg:
+            msg = f"Interesting perspective! Have you looked into $DEGEN? {msg}"
+        
+        # Clean any existing contract address and add cleanly at end
+        msg = msg.replace(f"CA: {DEGEN_ADDR}", "").replace(f"ca: {DEGEN_ADDR}", "").strip()
+        msg = msg.replace(DEGEN_ADDR, "").strip()
+        
+        # ALWAYS add contract address at the end
+        msg = f"{msg}\n\nCA: {DEGEN_ADDR}"
+        
+        # Try to add meme image
+        media_id = None
+        use_image = random.random() < 0.3  # 30% chance
+        if use_image:
+            try:
+                meme_files = glob.glob("raid_images/*.jpg")
+                if meme_files:
+                    img = choice(meme_files)
+                    media_id = x_api.media_upload(img).media_id_string
+            except Exception as e:
+                logger.warning(f"Meme upload failed: {e}")
+        
+        await safe_tweet(
+            text=truncate_to_sentence(msg, 240),
+            media_id=media_id,
+            in_reply_to_tweet_id=tweet.id
+        )
+        
+        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
+        logger.info(f"✅ Posted crypto raid reply to tweet {tweet.id}")
+        
+        # Random delay to look more human
+        await asyncio.sleep(random.uniform(5, 15))
+        
+    except Exception as e:
+        logger.error(f"Error in post_crypto_raid for tweet {tweet.id}: {e}", exc_info=True)
+        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
+
+async def broad_crypto_raid_loop():
+    """CRYPTO RAIDING - Search for crypto terms and raid those tweets"""
+    query_index = 0
+    
+    while True:
+        try:
+            # Rotate through different search queries for maximum coverage
+            current_query = SEARCH_QUERIES[query_index % len(SEARCH_QUERIES)]
+            query_index += 1
+            
+            params = {
+                "query": current_query,
+                "tweet_fields": ["id", "text", "conversation_id", "created_at", "author_id"],
+                "expansions": ["author_id"],
+                "user_fields": ["username", "public_metrics"],
+                "max_results": 25
+            }
+            res = await safe_search(x_client.search_recent_tweets, **params)
+            
+            if res and res.data:
+                # Create user mapping
+                user_map = {}
+                if hasattr(res, 'includes') and res.includes and 'users' in res.includes:
+                    for user in res.includes['users']:
+                        user_map[user.id] = user
+                
+                qualified_tweets = []
+                for tw in res.data:
+                    tid = str(tw.id)
+                    
+                    # Skip blocked tweets and already replied tweets
+                    if tid in BLOCKED_TWEET_IDS or redis_client.sismember(f"{REDIS_PREFIX}replied_ids", tid):
+                        continue
+                    
+                    # Get author info
+                    author = user_map.get(tw.author_id)
+                    follower_count = 0
+                    if author and hasattr(author, 'public_metrics'):
+                        follower_count = author.public_metrics.get('followers_count', 0)
+                    
+                    # QUALITY TARGETING - focus on engaged accounts
+                    should_raid = False
+                    
+                    # 1. Prioritize accounts with decent following (25+ followers) 
+                    if follower_count >= 25:
+                        should_raid = True
+                        
+                    # 2. Always raid tweets mentioning other memecoins (perfect audience)
+                    elif any(coin in tw.text.upper() for coin in ["$DOGE", "$SHIB", "$PEPE", "$BONK", "$WIF"]):
+                        should_raid = True
+                        
+                    # 3. Raid substantial crypto discussions from smaller accounts
+                    elif follower_count >= 10 and len(tw.text) > 60 and any(term in tw.text.lower() for term in ["crypto", "coin", "token", "blockchain"]):
+                        should_raid = True
+                    
+                    if should_raid:
+                        qualified_tweets.append(tw)
+                        username = author.username if author else 'unknown'
+                        logger.info(f"🎯 CRYPTO RAID: @{username} ({follower_count} followers): {tw.text[:50]}...")
+                
+                # Process qualified tweets
+                for tw in qualified_tweets[:5]:  # Max 5 per cycle
+                    try:
+                        await post_crypto_raid(tw)
+                        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+                    except Exception as e:
+                        logger.error(f"Error processing crypto raid {tw.id}: {e}")
+                        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+                
+                logger.info(f"🚀 CRYPTO RAIDED {len(qualified_tweets[:5])} tweets using query: '{current_query[:30]}...'")
+                
+            else:
+                logger.info(f"🔍 No results for query: '{current_query[:30]}...'")
+                
+        except Exception as e:
+            logger.error(f"broad_crypto_raid_loop error: {e}", exc_info=True)
+        
+        await asyncio.sleep(300)  # Every 5 minutes
     """Search for 'degen' mentions and raid them"""
     key = f"{REDIS_PREFIX}last_degen_id"
     if not redis_client.exists(key):

@@ -33,15 +33,16 @@ for var in required:
     if not os.getenv(var):
         raise RuntimeError(f"Missing env var: {var}")
 
-# Twitter API setup
+# Twitter API setup - Keep v1.1 for media upload only
 oauth = tweepy.OAuth1UserHandler(
     os.getenv("X_API_KEY"),
     os.getenv("X_API_KEY_SECRET"),
     os.getenv("X_ACCESS_TOKEN"),
     os.getenv("X_ACCESS_TOKEN_SECRET")
 )
-x_api = tweepy.API(oauth)
+x_api = tweepy.API(oauth)  # Only for media upload
 
+# Use v2 client for everything else
 x_client = tweepy.Client(
     bearer_token=os.getenv("X_BEARER_TOKEN"),
     consumer_key=os.getenv("X_API_KEY"),
@@ -233,7 +234,7 @@ async def safe_like(tweet_id: str):
         
     try:
         result = await safe_api_call(
-            lambda tid: x_api.create_favorite(id=tid),
+            lambda tid: x_client.like(tid),  # v2 endpoint
             None, 0, tweet_id
         )
         increment_daily_count('likes')
@@ -250,7 +251,7 @@ async def safe_retweet(tweet_id: str):
         
     try:
         result = await safe_api_call(
-            lambda tid: x_client.retweet(tid),
+            lambda tid: x_client.retweet(tid),  # v2 endpoint
             None, 0, tweet_id
         )
         increment_daily_count('retweets')
@@ -267,7 +268,7 @@ async def safe_follow(user_id: str):
         
     try:
         result = await safe_api_call(
-            lambda uid: x_client.follow_user(uid),
+            lambda uid: x_client.follow_user(uid),  # v2 endpoint
             None, 0, user_id
         )
         increment_daily_count('follows')
@@ -348,7 +349,7 @@ async def post_crypto_bullpost(tweet, is_mention=False):
         
         msg = ask_grok(prompt)
         img = choice(glob.glob("raid_images/*.jpg"))
-        media_id = x_api.media_upload(img).media_id_string
+        media_id = x_api.media_upload(img).media_id_string  # v1.1 media upload still works
         
         action_type = 'mentions' if is_mention else 'crypto_bullposts'
         

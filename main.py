@@ -590,17 +590,34 @@ async def hourly_post_loop():
     ]
     
     hour_counter = 0
+    logger.info("Starting hourly_post_loop...")
 
     while True:
         try:
+            logger.info(f"Hourly post attempt #{hour_counter + 1}")
+            
             # Fetch on-chain and market data
-            data     = fetch_data(DEGEN_ADDR)
-            metrics  = format_metrics(data)
+            logger.info("Fetching market data...")
+            data = fetch_data(DEGEN_ADDR)
+            logger.info(f"Market data fetched: {data}")
+            
+            if not data:
+                logger.warning("No market data received, skipping this cycle")
+                hour_counter += 1
+                await asyncio.sleep(3600)
+                continue
+            
+            metrics = format_metrics(data)
             dex_link = data.get('link', f"https://dexscreener.com/solana/{DEGEN_ADDR}")
+            logger.info(f"Formatted metrics: {metrics}")
 
             # Ask Grok for a clean one-liner
             selected_prompt = grok_prompts[hour_counter % len(grok_prompts)]
-            raw             = ask_grok(selected_prompt).strip()
+            logger.info(f"Using prompt #{hour_counter % len(grok_prompts)}: {selected_prompt[:50]}...")
+            
+            logger.info("Calling Grok...")
+            raw = ask_grok(selected_prompt).strip()
+            logger.info(f"Grok response: {raw}")
 
             # Build tweet: metrics block, one-liner, then link on its own line
             tweet = (
@@ -610,16 +627,26 @@ async def hourly_post_loop():
                 "\n\n" +
                 dex_link
             )
+            logger.info(f"Built tweet ({len(tweet)} chars): {tweet[:100]}...")
 
-            # Only post if it’s new
+            # Only post if it's new
             last = redis_client.get(f"{REDIS_PREFIX}last_hourly_post")
+            logger.info(f"Last post exists: {last is not None}")
+            
             if tweet != last:
+                logger.info("Tweet is different from last post, posting...")
                 await safe_tweet(tweet)
                 redis_client.set(f"{REDIS_PREFIX}last_hourly_post", tweet)
+                logger.info("Hourly tweet posted successfully!")
+            else:
+                logger.info("Tweet is same as last post, skipping...")
 
             hour_counter += 1
+            logger.info(f"Hourly post cycle completed. Next cycle in 1 hour (counter: {hour_counter})")
+            
         except Exception as e:
-            logger.error(f"Hourly post error: {e}")
+            logger.error(f"Hourly post error: {e}", exc_info=True)
+            
         await asyncio.sleep(3600)
 
 async def main():

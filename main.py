@@ -421,6 +421,36 @@ async def post_crypto_raid(tweet):
         logger.error(f"Error in post_crypto_raid for tweet {tweet.id}: {e}", exc_info=True)
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
 
+async def search_degen_loop():
+    """Search for 'degen' mentions and raid them"""
+    key = f"{REDIS_PREFIX}last_degen_id"
+    if not redis_client.exists(key):
+        redis_client.set(key, INITIAL_SEARCH_ID)
+
+    while True:
+        try:
+            last_id = redis_client.get(key)
+            params = {
+                "query": "degen -is:retweet",
+                "since_id": last_id,
+                "tweet_fields": ["id", "text", "conversation_id", "created_at"],
+                "max_results": 10
+            }
+            res = await safe_search(x_client.search_recent_tweets, **params)
+            if res and res.data:
+                newest = max(int(t.id) for t in res.data)
+                for tw in res.data:
+                    tid = str(tw.id)
+                    if tid in BLOCKED_TWEET_IDS or redis_client.sismember(f"{REDIS_PREFIX}replied_ids", tid):
+                        continue
+                    await post_raid(tw)
+                    redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tid)
+                redis_client.set(key, str(newest))
+                logger.info(f"🎯 Processed {len(res.data)} degen mentions")
+        except Exception as e:
+            logger.error(f"search_degen_loop error: {e}", exc_info=True)
+        await asyncio.sleep(180)  # every 3 minutes
+
 async def broad_crypto_raid_loop():
     """CRYPTO RAIDING - Search for crypto terms and raid those tweets"""
     query_index = 0
@@ -499,34 +529,6 @@ async def broad_crypto_raid_loop():
             logger.error(f"broad_crypto_raid_loop error: {e}", exc_info=True)
         
         await asyncio.sleep(300)  # Every 5 minutes
-    """Search for 'degen' mentions and raid them"""
-    key = f"{REDIS_PREFIX}last_degen_id"
-    if not redis_client.exists(key):
-        redis_client.set(key, INITIAL_SEARCH_ID)
-
-    while True:
-        try:
-            last_id = redis_client.get(key)
-            params = {
-                "query": "degen -is:retweet",
-                "since_id": last_id,
-                "tweet_fields": ["id", "text", "conversation_id", "created_at"],
-                "max_results": 10
-            }
-            res = await safe_search(x_client.search_recent_tweets, **params)
-            if res and res.data:
-                newest = max(int(t.id) for t in res.data)
-                for tw in res.data:
-                    tid = str(tw.id)
-                    if tid in BLOCKED_TWEET_IDS or redis_client.sismember(f"{REDIS_PREFIX}replied_ids", tid):
-                        continue
-                    await post_raid(tw)
-                    redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tid)
-                redis_client.set(key, str(newest))
-                logger.info(f"🎯 Processed {len(res.data)} degen mentions")
-        except Exception as e:
-            logger.error(f"search_degen_loop error: {e}", exc_info=True)
-        await asyncio.sleep(180)  # every 3 minutes
 
 async def handle_mention(tw):
     """FIXED MENTION HANDLING - Single function, clean replies"""
@@ -738,11 +740,12 @@ async def main():
         
         logger.info("💎 Starting bot functions (NO AUTO LIKING)...")
         
-        # Run ONLY the essential loops - NO AUTO LIKING
+        # Run all the essential loops
         await asyncio.gather(
             search_mentions_loop(),      # Handle @mentions with $DEGEN+CA
             hourly_post_loop(),         # Fixed hourly format 
             search_degen_loop(),        # Search 'degen' and raid with $DEGEN+CA
+            broad_crypto_raid_loop(),   # Search crypto terms and raid
         )
         
     except Exception as e:

@@ -13,9 +13,6 @@ from random import choice
 import glob
 import http.client
 
-like_timestamps = deque()
-LIKE_LIMIT = 50  # or choose an appropriate per-15-min limit
-
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -77,14 +74,6 @@ DEXS_URL = "https://api.dexscreener.com/token-pairs/v1/solana/"
 ADDR_RE = re.compile(r"\b[A-Za-z0-9]{43,44}\b")
 SYMBOL_RE = re.compile(r"\$([A-Za-z0-9]{2,10})", re.IGNORECASE)
 USERNAME_RE = re.compile(rf"@{BOT_USERNAME}\b", re.IGNORECASE)  # Match bot's username
-
-RATE_WINDOW = 900
-MENTIONS_LIMIT = 10
-TWEETS_LIMIT = 50
-SEARCH_LIMIT = 10  # Limit for search API calls
-mentions_timestamps = deque()
-tweet_timestamps = deque()
-search_timestamps = deque()
 
 # Set initial search ID to current time-based ID to avoid the "since_id too old" error
 # Twitter IDs are roughly time-based, so this gives us a recent starting point
@@ -148,16 +137,7 @@ def ask_grok(prompt: str) -> str:
         return "Unable to provide an update at this time."
 
 async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
-    logger.info(f"safe_api_call: Starting API call, queue length: {len(timestamps_queue)}, limit: {limit}")
-    
-    now = time.time()
-    while timestamps_queue and now - timestamps_queue[0] > RATE_WINDOW:
-        timestamps_queue.popleft()
-    
-    if len(timestamps_queue) >= limit:
-        sleep_time = RATE_WINDOW - (now - timestamps_queue[0]) + 1
-        logger.info(f"Rate limit hit, sleeping for {sleep_time} seconds")
-        await asyncio.sleep(sleep_time)
+    logger.info(f"safe_api_call: Making API call (ignoring internal limits)")
     
     try:
         logger.info("Making API call...")
@@ -169,27 +149,21 @@ async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
         await asyncio.sleep(5)
         return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
     except tweepy.TooManyRequests as e:
-        reset = int(e.response.headers.get('x-rate-limit-reset', time.time()+RATE_WINDOW))
-        sleep_time = reset - time.time() + 1
-        logger.warning(f"Rate limit exceeded, sleeping for {sleep_time} seconds")
-        await asyncio.sleep(sleep_time)
+        logger.warning(f"Twitter rate limit hit, sleeping for 60 seconds")
+        await asyncio.sleep(60)  # Just sleep for 1 minute, ignore Twitter's reset time
         return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
     except tweepy.BadRequest as e:
         logger.error(f"BadRequest error: {e}")
-        # Pass BadRequest up to be handled by the caller
         raise e
     except Exception as e:
         logger.error(f"API call error: {e}", exc_info=True)
         raise e
-    finally:
-        timestamps_queue.append(time.time())
-        logger.info(f"API call completed, queue length now: {len(timestamps_queue)}")
 
 async def safe_mention_lookup(fn, *args, **kwargs):
-    return await safe_api_call(fn, mentions_timestamps, MENTIONS_LIMIT, *args, **kwargs)
+    return await safe_api_call(fn, None, 0, *args, **kwargs)
 
 async def safe_search(fn, *args, **kwargs):
-    return await safe_api_call(fn, search_timestamps, SEARCH_LIMIT, *args, **kwargs)
+    return await safe_api_call(fn, None, 0, *args, **kwargs)
 
 async def safe_tweet(text: str, media_id=None, **kwargs):
     logger.info(f"safe_tweet: Attempting to tweet ({len(text)} chars)")
@@ -198,8 +172,8 @@ async def safe_tweet(text: str, media_id=None, **kwargs):
     try:
         result = await safe_api_call(
             lambda t, m, **kw: x_client.create_tweet(text=t, media_ids=[m] if m else None, **kw),
-            tweet_timestamps, 
-            TWEETS_LIMIT,
+            None, 
+            0,
             text, 
             media_id, 
             **kwargs
@@ -213,8 +187,8 @@ async def safe_tweet(text: str, media_id=None, **kwargs):
 async def safe_like(tweet_id: str):
     return await safe_api_call(
         lambda tid: x_api.create_favorite(id=tid),
-        like_timestamps,
-        LIKE_LIMIT,
+        None,
+        0,
         tweet_id
     )
 

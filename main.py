@@ -148,22 +148,34 @@ def ask_grok(prompt: str) -> str:
         return "Unable to provide an update at this time."
 
 async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
+    logger.info(f"safe_api_call: Starting API call, queue length: {len(timestamps_queue)}, limit: {limit}")
+    
     now = time.time()
     while timestamps_queue and now - timestamps_queue[0] > RATE_WINDOW:
         timestamps_queue.popleft()
+    
     if len(timestamps_queue) >= limit:
-        await asyncio.sleep(RATE_WINDOW - (now - timestamps_queue[0]) + 1)
+        sleep_time = RATE_WINDOW - (now - timestamps_queue[0]) + 1
+        logger.info(f"Rate limit hit, sleeping for {sleep_time} seconds")
+        await asyncio.sleep(sleep_time)
+    
     try:
-        return fn(*args, **kwargs)
+        logger.info("Making API call...")
+        result = fn(*args, **kwargs)
+        logger.info("API call successful")
+        return result
     except (requests.exceptions.ConnectionError, http.client.RemoteDisconnected) as e:
-            logger.warning(f"Network error during API call: {e}. Retrying in 5s…")
-            await asyncio.sleep(5)
-            return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
+        logger.warning(f"Network error during API call: {e}. Retrying in 5s…")
+        await asyncio.sleep(5)
+        return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
     except tweepy.TooManyRequests as e:
         reset = int(e.response.headers.get('x-rate-limit-reset', time.time()+RATE_WINDOW))
-        await asyncio.sleep(reset - time.time() + 1)
+        sleep_time = reset - time.time() + 1
+        logger.warning(f"Rate limit exceeded, sleeping for {sleep_time} seconds")
+        await asyncio.sleep(sleep_time)
         return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
     except tweepy.BadRequest as e:
+        logger.error(f"BadRequest error: {e}")
         # Pass BadRequest up to be handled by the caller
         raise e
     except Exception as e:
@@ -171,6 +183,7 @@ async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
         raise e
     finally:
         timestamps_queue.append(time.time())
+        logger.info(f"API call completed, queue length now: {len(timestamps_queue)}")
 
 async def safe_mention_lookup(fn, *args, **kwargs):
     return await safe_api_call(fn, mentions_timestamps, MENTIONS_LIMIT, *args, **kwargs)
@@ -179,14 +192,23 @@ async def safe_search(fn, *args, **kwargs):
     return await safe_api_call(fn, search_timestamps, SEARCH_LIMIT, *args, **kwargs)
 
 async def safe_tweet(text: str, media_id=None, **kwargs):
-    return await safe_api_call(
-        lambda t, m, **kw: x_client.create_tweet(text=t, media_ids=[m] if m else None, **kw),
-        tweet_timestamps, 
-        TWEETS_LIMIT,
-        text, 
-        media_id, 
-        **kwargs
-    )
+    logger.info(f"safe_tweet: Attempting to tweet ({len(text)} chars)")
+    logger.info(f"Tweet text: {text[:100]}...")
+    
+    try:
+        result = await safe_api_call(
+            lambda t, m, **kw: x_client.create_tweet(text=t, media_ids=[m] if m else None, **kw),
+            tweet_timestamps, 
+            TWEETS_LIMIT,
+            text, 
+            media_id, 
+            **kwargs
+        )
+        logger.info("safe_tweet: Tweet posted successfully")
+        return result
+    except Exception as e:
+        logger.error(f"safe_tweet: Error posting tweet: {e}", exc_info=True)
+        raise e
 
 async def safe_like(tweet_id: str):
     return await safe_api_call(
@@ -294,7 +316,7 @@ async def search_degen_loop():
                     if tid in BLOCKED_TWEET_IDS or redis_client.sismember(f"{REDIS_PREFIX}replied_ids", tid):
                         continue
                     await post_raid(tw)
-                    # mark it so we don’t double-reply
+                    # mark it so we don't double-reply
                     redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tid)
                 redis_client.set(key, str(newest))
         except Exception as e:
@@ -328,90 +350,6 @@ async def auto_like_degen_loop():
             logger.error(f"auto_like_degen_loop error: {e}", exc_info=True)
         await asyncio.sleep(300)  # every 5 minutes
 
-
-async def handle_mention(tw):
-    try:
-        convo_id = tw.conversation_id or tw.id
-        if redis_client.hget(get_thread_key(convo_id), "count") is None:
-            try:
-                root = x_client.get_tweet(convo_id, tweet_fields=['text']).data.text
-                update_thread(convo_id, f"ROOT: {root}", "")
-            except Exception as e:
-                logger.warning(f"Failed to get root tweet: {e}")
-                update_thread(convo_id, f"ROOT: Unknown", "")
-        history = get_thread_history(convo_id)
-        txt = re.sub(rf"@{BOT_USERNAME}\b", "", tw.text, flags=re.IGNORECASE).strip()
-
-        # 1) raid
-        if re.search(r"\braid\b", txt, re.IGNORECASE):
-            await post_raid(tw)
-            return
-
-        # 2) Check for DEX or CA commands
-        if re.search(r"\b(dex|ca|contract|address)\b", txt, re.IGNORECASE):
-            img = choice(glob.glob("raid_images/*.jpg"))
-            media_id = x_api.media_upload(img).media_id_string
-            await safe_tweet(
-                text=build_dex_reply(DEGEN_ADDR),
-                media_id=media_id,
-                in_reply_to_tweet_id=tw.id
-            )
-            redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-            return
-
-        # 3) token/address -> DEX preview
-        token = next((w for w in txt.split() if w.startswith('$') or ADDR_RE.match(w)), None)
-        if token:
-            sym = token.lstrip('$').upper()
-            addr = DEGEN_ADDR if sym=="DEGEN" else lookup_address(token)
-            if addr:
-                img = choice(glob.glob("raid_images/*.jpg"))
-                media_id = x_api.media_upload(img).media_id_string
-                await safe_tweet(
-                    text=build_dex_reply(addr),
-                    media_id=media_id,
-                    in_reply_to_tweet_id=tw.id
-                )
-                redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-                return
-
-        # 4) general fallback
-        prompt = (
-            f"History:{history}\n"
-            f"User asked: \"{txt}\"\n"
-            "First, answer naturally and concisely. "
-
-        )
-        raw = ask_grok(prompt)
-        
-        # Ensure we have a complete response that doesn't get cut off
-        reply_body = raw.strip()
-        
-        # Make sure the response contains $DEGEN mention and contract address
-        if "$DEGEN" not in reply_body:
-            reply = f"{reply_body}\n\nStack $DEGEN! : {DEGEN_ADDR}"
-        else:
-                reply = reply_body
-        
-        # Ensure we're not exceeding Twitter's character limit
-        if len(reply) > 360:
-            reply = truncate_to_sentence(reply, 360) + f"\n\nStack $DEGEN. ca: {DEGEN_ADDR}"
-        
-        img = choice(glob.glob("raid_images/*.jpg"))
-        media_id = x_api.media_upload(img).media_id_string
-        
-        await safe_tweet(
-            text=reply,
-            media_id=media_id,
-            in_reply_to_tweet_id=tw.id
-        )
-        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
-        update_thread(convo_id, txt, reply)
-        increment_thread(convo_id)
-    except Exception as e:
-        logger.error(f"Error handling mention {tw.id}: {e}", exc_info=True)
-        # Mark the tweet as replied to avoid getting stuck in a loop
-        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
 
 async def handle_mention(tw):
     try:
@@ -509,6 +447,7 @@ async def handle_mention(tw):
         logger.error(f"Error handling mention {tw.id}: {e}", exc_info=True)
         # Mark the tweet as replied to avoid getting stuck in a loop
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+
 async def search_mentions_loop():
     """
     New loop to handle searching for mentions that might not be captured by the mentions API,
@@ -596,50 +535,58 @@ async def hourly_post_loop():
         try:
             logger.info(f"Hourly post attempt #{hour_counter + 1}")
             
-            # Fetch on-chain and market data
-            logger.info("Fetching market data...")
-            data = fetch_data(DEGEN_ADDR)
-            logger.info(f"Market data fetched: {data}")
-            
-            if not data:
-                logger.warning("No market data received, skipping this cycle")
-                hour_counter += 1
-                await asyncio.sleep(3600)
-                continue
-            
-            metrics = format_metrics(data)
-            dex_link = data.get('link', f"https://dexscreener.com/solana/{DEGEN_ADDR}")
-            logger.info(f"Formatted metrics: {metrics}")
+            # Define the posting logic as a separate async function for timeout wrapping
+            async def do_hourly_post():
+                # Fetch on-chain and market data
+                logger.info("Fetching market data...")
+                data = fetch_data(DEGEN_ADDR)
+                logger.info(f"Market data fetched: {data}")
+                
+                if not data:
+                    logger.warning("No market data received, skipping this cycle")
+                    return False
+                
+                metrics = format_metrics(data)
+                dex_link = data.get('link', f"https://dexscreener.com/solana/{DEGEN_ADDR}")
+                logger.info(f"Formatted metrics: {metrics}")
 
-            # Ask Grok for a clean one-liner
-            selected_prompt = grok_prompts[hour_counter % len(grok_prompts)]
-            logger.info(f"Using prompt #{hour_counter % len(grok_prompts)}: {selected_prompt[:50]}...")
-            
-            logger.info("Calling Grok...")
-            raw = ask_grok(selected_prompt).strip()
-            logger.info(f"Grok response: {raw}")
+                # Ask Grok for a clean one-liner
+                selected_prompt = grok_prompts[hour_counter % len(grok_prompts)]
+                logger.info(f"Using prompt #{hour_counter % len(grok_prompts)}: {selected_prompt[:50]}...")
+                
+                logger.info("Calling Grok...")
+                raw = ask_grok(selected_prompt).strip()
+                logger.info(f"Grok response: {raw}")
 
-            # Build tweet: metrics block, one-liner, then link on its own line
-            tweet = (
-                metrics.rstrip() +
-                "\n\n" +
-                raw +
-                "\n\n" +
-                dex_link
-            )
-            logger.info(f"Built tweet ({len(tweet)} chars): {tweet[:100]}...")
+                # Build tweet: metrics block, one-liner, then link on its own line
+                tweet = (
+                    metrics.rstrip() +
+                    "\n\n" +
+                    raw +
+                    "\n\n" +
+                    dex_link
+                )
+                logger.info(f"Built tweet ({len(tweet)} chars): {tweet[:100]}...")
 
-            # Only post if it's new
-            last = redis_client.get(f"{REDIS_PREFIX}last_hourly_post")
-            logger.info(f"Last post exists: {last is not None}")
-            
-            if tweet != last:
-                logger.info("Tweet is different from last post, posting...")
-                await safe_tweet(tweet)
-                redis_client.set(f"{REDIS_PREFIX}last_hourly_post", tweet)
-                logger.info("Hourly tweet posted successfully!")
-            else:
-                logger.info("Tweet is same as last post, skipping...")
+                # Only post if it's new
+                last = redis_client.get(f"{REDIS_PREFIX}last_hourly_post")
+                logger.info(f"Last post exists: {last is not None}")
+                
+                if tweet != last:
+                    logger.info("Tweet is different from last post, posting...")
+                    await safe_tweet(tweet)
+                    redis_client.set(f"{REDIS_PREFIX}last_hourly_post", tweet)
+                    logger.info("Hourly tweet posted successfully!")
+                    return True
+                else:
+                    logger.info("Tweet is same as last post, skipping...")
+                    return False
+
+            # Use asyncio.wait_for with 5 minute timeout
+            try:
+                await asyncio.wait_for(do_hourly_post(), timeout=300)
+            except asyncio.TimeoutError:
+                logger.error("Hourly post timed out after 5 minutes, continuing to next cycle")
 
             hour_counter += 1
             logger.info(f"Hourly post cycle completed. Next cycle in 1 hour (counter: {hour_counter})")

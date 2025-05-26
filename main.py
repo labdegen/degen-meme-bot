@@ -192,7 +192,7 @@ def ask_grok(prompt: str) -> str:
     except Exception as e:
         logger.warning(f"Grok error: {e}, falling back to OpenAI…")
         try:
-            resp = openai.ChatCompletion.create(
+            resp = openai.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},

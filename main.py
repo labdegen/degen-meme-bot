@@ -531,8 +531,8 @@ async def main_post_loop():
                     link = data.get('link', f"https://dexscreener.com/solana/{DEGEN_ADDR}")
                     raw = ask_grok(grok_prompts[hour_counter % len(grok_prompts)]).strip()
                     tweet = f"{metrics.rstrip()}\n\n{raw}\n\n{link}"
-                    last Tweet = redis_client.get(f"{REDIS_PREFIX}last_main_post")
-                    if tweet != last Tweet:
+                    last_tweet = redis_client.get(f"{REDIS_PREFIX}last_main_post")
+                    if tweet != last_tweet:
                         await safe_tweet(tweet, action_type='main_posts')
                         redis_client.set(f"{REDIS_PREFIX}last_main_post", tweet)
                 hour_counter += 1

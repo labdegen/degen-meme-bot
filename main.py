@@ -22,6 +22,13 @@ logger = logging.getLogger(__name__)
 dotenv_path = os.getenv('DOTENV_PATH', '.env')
 load_dotenv(dotenv_path)
 
+# List of problematic tweet IDs to always skip
+BLOCKED_TWEET_IDS = [
+    "1924845778821845267", 
+    "1926657606195593300", 
+    "1926648154012741852"
+]
+
 # Required environment vars
 required = [
     "X_API_KEY", "X_API_KEY_SECRET",

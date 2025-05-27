@@ -446,6 +446,7 @@ async def crypto_engagement_loop():
                 users = {u.id: u for u in res.includes.get('users', [])}
                 scored = []
                 for tw in res.data:
+                    # ONLY process tweets that contain the DEGEN contract address
                     if DEGEN_ADDR not in tw.text: continue
                     if str(tw.id) in BLOCKED_TWEET_IDS or redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
                         continue
@@ -463,6 +464,7 @@ async def crypto_engagement_loop():
                             await post_crypto_bullpost(tw, False)
                     elif choice_num <= 6:
                         await safe_like(str(tw.id))
+                        # ONLY retweet if tweet contains contract address (which it does since we filtered above)
                         if randint(1,3) == 1:
                             await safe_retweet(str(tw.id))
                     elif choice_num <= 8:
@@ -474,7 +476,6 @@ async def crypto_engagement_loop():
         except Exception as e:
             logger.error(f"crypto_engagement_loop error: {e}", exc_info=True)
         await asyncio.sleep(900)
-
 async def ogdegen_monitor_loop():
     key = f"{REDIS_PREFIX}last_ogdegen_id"
     if not redis_client.exists(key):
@@ -487,14 +488,35 @@ async def ogdegen_monitor_loop():
             if res and res.data:
                 newest = max(int(t.id) for t in res.data)
                 for tw in res.data:
-                    if DEGEN_ADDR not in tw.text: continue
-                    await safe_retweet(str(tw.id))
-                    await safe_like(str(tw.id))
-                    logger.info(f"Retweeted & liked ogdegen post: {tw.id}")
+                    # Create bullpost reply WITHOUT @mention in the text
+                    try:
+                        prompt = f"User posted about crypto: '{tw.text[:100]}...'\nWrite a compelling one-liner bullpost about $DEGEN... End with NFA."
+                        msg = ask_grok(prompt)
+                        img = choice(glob.glob("raid_images/*.jpg"))
+                        media_id = x_api.media_upload(img).media_id_string
+                        
+                        # Reply to the tweet (in_reply_to creates the reply thread)
+                        await safe_tweet(
+                            text=truncate_to_sentence(msg, 240),
+                            media_id=media_id,
+                            in_reply_to_tweet_id=tw.id,  # This makes it a reply
+                            action_type='crypto_bullposts'
+                        )
+                        
+                        # Always like the tweet
+                        await safe_like(str(tw.id))
+                        
+                        logger.info(f"Bullpost replied & liked ogdegen post: {tw.id}")
+                        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+                    except Exception as e:
+                        logger.error(f"Error replying to ogdegen: {e}")
+                        redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+                    
                 redis_client.set(key, str(newest))
         except Exception as e:
             logger.error(f"ogdegen_monitor_loop error: {e}")
         await asyncio.sleep(300)
+
 
 async def contract_monitor_loop():
     key = f"{REDIS_PREFIX}last_contract_id"
@@ -520,12 +542,12 @@ async def contract_monitor_loop():
 
 async def main_post_loop():
     grok_prompts = [
-        "Write a positive one-sentence analytical update on $DEGEN using recent market data. Do not mention the contract address. No slang. High class but a little edgy like Don Draper.",
-        "Write a positive one-sentence hot take on $DEGEN's price action. Be edgy and risky. Do not mention the contract address. No slang. High class but a little edgy like Don Draper.",
-        "Write a one sentence, cryptic message about $DEGEN that implies insider knowledge. Do not mention the contract address. No slang. High class but a little edgy like David Foster Wallace.",
-        "Write a one sentence, savage comment about people who haven't bought $DEGEN yet. Do not mention the contract address. No slang. High class but a little edgy like Elon Musk.",
-        "Write a one sentence comparing $DEGEN to the broader crypto market. Do not mention the contract address. No slang. High class but a little edgy like Hemingway.",
-        "Write a one sentence post about diamond hands and $DEGEN's future potential. Do not mention the contract address. No slang. High class but a little edgy like Hunter Thompson."
+        "Write a positive one-sentence analytical update on $DEGEN using recent market data. Do not mention the contract address. No slang. High class, secretive but a little edgy like JD Salinger. Do not mention horses, stallions or other goofy stuff.",
+        "Write a positive one-sentence hot take on $DEGEN's price action. Be edgy and risky. Do not mention the contract address. No slang. High class but a little edgy like Don Draper. Do not mention horses, stallions or other goofy stuff.",
+        "Write a one sentence, cryptic message about $DEGEN that implies insider knowledge. Do not mention the contract address. No slang. High class but a little edgy like David Foster Wallace. Do not mention horses, stallions or other goofy stuff.",
+        "Write a one sentence, savage comment about people who haven't bought $DEGEN yet. Do not mention the contract address. No slang. High class but a little edgy like Elon Musk. Do not mention horses, stallions or other goofy stuff.",
+        "Write a one sentence comparing $DEGEN to the broader crypto market. Do not mention the contract address. No slang. High class but a little edgy like Hemingway. Do not mention horses, stallions or other goofy stuff.",
+        "Write a one sentence post about diamond hands and $DEGEN's future potential. Do not mention the contract address. No slang. High class but a little edgy like Hunter Thompson. Do not mention horses, stallions or other goofy stuff."
     ]
     hour_counter = 0
     logger.info("Starting main_post_loop...")

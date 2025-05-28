@@ -351,6 +351,10 @@ async def upload_media(image_path):
     data = fetch_data(addr)
     if not data:
         return f"Unable to fetch data for {addr}"
+def build_dex_reply(addr: str) -> str:
+    data = fetch_data(addr)
+    if not data:
+        return f"Unable to fetch data for {addr}"
     return format_metrics(data) + data['link']
 
 # Posting logic
@@ -380,10 +384,7 @@ async def post_crypto_bullpost(tweet, is_mention=False):
         media_id = None
         if image_files:
             img = choice(image_files)
-            try:
-                media_id = x_api.media_upload(img).media_id_string
-            except Exception as e:
-                logger.warning(f"Failed to upload image: {e}")
+            media_id = await upload_media(img)
         
         action_type = 'mentions' if is_mention else 'crypto_bullposts'
         result = await safe_tweet(
@@ -474,10 +475,7 @@ async def handle_mention(tw):
         media_id = None
         if image_files:
             img = choice(image_files)
-            try:
-                media_id = x_api.media_upload(img).media_id_string
-            except Exception as e:
-                logger.warning(f"Failed to upload image: {e}")
+            media_id = await upload_media(img)
                 
         result = await safe_tweet(
             text=reply,
@@ -501,30 +499,46 @@ async def handle_mention(tw):
 
 # FIXED: Added better error handling and logging to all loops
 async def search_mentions_loop():
-    if not redis_client.exists(f"{REDIS_PREFIX}last_search_id"):
-        redis_client.set(f"{REDIS_PREFIX}last_search_id", INITIAL_SEARCH_ID)
+    last_search_key = f"{REDIS_PREFIX}last_mention_search_id"
+    if not redis_client.exists(last_search_key):
+        redis_client.set(last_search_key, INITIAL_SEARCH_ID)
     
     logger.info("Starting search_mentions_loop...")
     while True:
         try:
-            logger.info("Searching for mentions...")
+            since_id = redis_client.get(last_search_key)
+            logger.info(f"Searching for mentions since ID: {since_id}")
+            
             params = {
                 "query": f"@{BOT_USERNAME} -is:retweet",
                 "tweet_fields": ["id","text","conversation_id","created_at"],
                 "expansions": ["author_id"],
                 "user_fields": ["username"],
-                "max_results": 10
+                "max_results": 10,
+                "since_id": since_id  # Only get tweets newer than this
             }
             res = await safe_search(x_client.search_recent_tweets, **params)
             
             if res and res.data:
-                logger.info(f"Found {len(res.data)} mentions to process")
+                logger.info(f"Found {len(res.data)} new mentions to process")
+                newest_id = max(int(t.id) for t in res.data)
+                processed_count = 0
+                
                 for tw in res.data:
                     if str(tw.id) in BLOCKED_TWEET_IDS or redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
                         logger.info(f"Skipping already processed tweet {tw.id}")
                         continue
+                    
+                    logger.info(f"Processing mention from tweet {tw.id}")
                     await handle_mention(tw)
+                    processed_count += 1
                     await asyncio.sleep(2)  # Rate limiting between mentions
+                
+                logger.info(f"Processed {processed_count} new mentions")
+                
+                # Update the since_id to the newest tweet we found
+                redis_client.set(last_search_key, str(newest_id))
+                logger.info(f"Updated search cursor to ID: {newest_id}")
             else:
                 logger.info("No new mentions found")
                 
@@ -635,10 +649,7 @@ async def ogdegen_monitor_loop():
                         media_id = None
                         if image_files:
                             img = choice(image_files)
-                            try:
-                                media_id = x_api.media_upload(img).media_id_string
-                            except Exception as e:
-                                logger.warning(f"Failed to upload image: {e}")
+                            media_id = await upload_media(img)
                         
                         # Reply to the tweet (in_reply_to creates the reply thread)
                         result = await safe_tweet(

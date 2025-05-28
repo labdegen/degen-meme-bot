@@ -208,12 +208,16 @@ def ask_grok(prompt: str) -> str:
             logger.error(f"OpenAI fallback also failed: {oe}")
             return "Unable to provide an update at this time."
 
-# FIXED: Improved error handling with max retries and better timeout handling
+# FIXED: Proper handling of sync Twitter API calls
 async def safe_api_call(fn, max_retries=3, *args, **kwargs):
     for attempt in range(max_retries):
         try:
-            # Twitter API functions are already async, so call them directly with timeout
-            result = await asyncio.wait_for(fn(*args, **kwargs), timeout=30.0)
+            # Twitter API functions are synchronous, so use run_in_executor
+            loop = asyncio.get_event_loop()
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: fn(*args, **kwargs)),
+                timeout=30.0
+            )
             return result
         except asyncio.TimeoutError:
             logger.warning(f"API call timeout on attempt {attempt + 1}/{max_retries}")
@@ -248,8 +252,11 @@ async def safe_tweet(text: str, media_id=None, action_type='mentions', **kwargs)
         return None
     
     result = await safe_api_call(
-        lambda: x_client.create_tweet(text=text, media_ids=[media_id] if media_id else None, **kwargs),
-        3
+        x_client.create_tweet, 
+        3, 
+        text=text, 
+        media_ids=[media_id] if media_id else None, 
+        **kwargs
     )
     if result:
         increment_daily_count(action_type)
@@ -261,9 +268,8 @@ async def safe_tweet(text: str, media_id=None, action_type='mentions', **kwargs)
 async def safe_like(tweet_id: str):
     if not can_perform_action('likes'):
         return None
-    result = await safe_api_call(
-        lambda: x_client.like(tweet_id), 3
-    )
+        
+    result = await safe_api_call(x_client.like, 3, tweet_id)
     if result:
         increment_daily_count('likes')
         logger.info(f"Successfully liked tweet {tweet_id}")
@@ -272,9 +278,8 @@ async def safe_like(tweet_id: str):
 async def safe_retweet(tweet_id: str):
     if not can_perform_action('retweets'):
         return None
-    result = await safe_api_call(
-        lambda: x_client.retweet(tweet_id), 3
-    )
+        
+    result = await safe_api_call(x_client.retweet, 3, tweet_id)
     if result:
         increment_daily_count('retweets')
         logger.info(f"Successfully retweeted {tweet_id}")
@@ -283,9 +288,8 @@ async def safe_retweet(tweet_id: str):
 async def safe_follow(user_id: str):
     if not can_perform_action('follows'):
         return None
-    result = await safe_api_call(
-        lambda: x_client.follow_user(user_id), 3
-    )
+        
+    result = await safe_api_call(x_client.follow_user, 3, user_id)
     if result:
         increment_daily_count('follows')
         logger.info(f"Successfully followed user {user_id}")
@@ -335,7 +339,15 @@ def lookup_address(token: str) -> str:
         pass
     return None
 
-def build_dex_reply(addr: str) -> str:
+async def upload_media(image_path):
+    """Helper function to upload media safely"""
+    try:
+        loop = asyncio.get_event_loop()
+        media = await loop.run_in_executor(None, x_api.media_upload, image_path)
+        return media.media_id_string
+    except Exception as e:
+        logger.warning(f"Failed to upload image {image_path}: {e}")
+        return None
     data = fetch_data(addr)
     if not data:
         return f"Unable to fetch data for {addr}"
@@ -398,8 +410,11 @@ async def handle_mention(tw):
         convo_id = tw.conversation_id or tw.id
         if redis_client.hget(get_thread_key(convo_id), "count") is None:
             try:
-                root = x_client.get_tweet(convo_id, tweet_fields=['text']).data.text
-                update_thread(convo_id, f"ROOT: {root}", "")
+                root_tweet = await safe_api_call(x_client.get_tweet, 3, convo_id, tweet_fields=['text'])
+                if root_tweet and root_tweet.data:
+                    update_thread(convo_id, f"ROOT: {root_tweet.data.text}", "")
+                else:
+                    update_thread(convo_id, f"ROOT: Unknown", "")
             except:
                 update_thread(convo_id, f"ROOT: Unknown", "")
         

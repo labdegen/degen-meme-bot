@@ -212,11 +212,8 @@ def ask_grok(prompt: str) -> str:
 async def safe_api_call(fn, max_retries=3, *args, **kwargs):
     for attempt in range(max_retries):
         try:
-            # Add timeout to the function call using asyncio.wait_for
-            result = await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(None, fn, *args, **kwargs),
-                timeout=30.0
-            )
+            # Twitter API functions are already async, so call them directly with timeout
+            result = await asyncio.wait_for(fn(*args, **kwargs), timeout=30.0)
             return result
         except asyncio.TimeoutError:
             logger.warning(f"API call timeout on attempt {attempt + 1}/{max_retries}")

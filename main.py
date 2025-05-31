@@ -238,7 +238,8 @@ async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
         await asyncio.sleep(5)
         return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
     except tweepy.TooManyRequests as e:
-        logger.warning(f"Twitter rate limit hit")
+    logger.warning(f"Rate limit response: {e.response.text}")
+    logger.warning(f"Rate limit headers: {e.response.headers}")
         
         # Try to parse rate limit reset from headers
         reset_time = None

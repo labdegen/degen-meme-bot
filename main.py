@@ -199,6 +199,19 @@ def can_post_tweet():
                    get_daily_count('mentions'))
     return total_tweets < DAILY_TWEET_LIMITS['total_tweets']
 
+# Global flag to track daily tweet limit exhaustion
+daily_tweet_limit_exhausted = False
+daily_limit_reset_time = None
+
+def check_daily_limit_exhaustion():
+    """Check if daily limit reset time has passed"""
+    global daily_tweet_limit_exhausted, daily_limit_reset_time
+    
+    if daily_limit_reset_time and time.time() > daily_limit_reset_time:
+        daily_tweet_limit_exhausted = False
+        daily_limit_reset_time = None
+        logger.info("Daily tweet limit has reset - resuming tweet attempts")
+
 # Grok prompt
 SYSTEM_PROMPT = (
     "You are a degenerate gambler crypto analyst: edgy, informal, risk-taking. No slang. High class but a little edgy like Don Draper. "
@@ -238,22 +251,40 @@ async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
         await asyncio.sleep(5)
         return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
     except tweepy.TooManyRequests as e:
+        global daily_tweet_limit_exhausted, daily_limit_reset_time
+        
         logger.warning(f"Rate limit response: {e.response.text}")
         logger.warning(f"Rate limit headers: {e.response.headers}")
         
-        # Try to parse rate limit reset from headers
-        reset_time = None
+        # Check if it's daily user tweet limit exhaustion
         if hasattr(e, 'response') and e.response and hasattr(e.response, 'headers'):
-            reset_header = e.response.headers.get('x-rate-limit-reset')
-            if reset_header:
-                try:
-                    reset_time = int(reset_header)
-                    sleep_duration = max(reset_time - int(time.time()) + 10, 60)  # Add 10s buffer
-                    logger.warning(f"Rate limit resets at {reset_time}, sleeping for {sleep_duration}s")
-                    await asyncio.sleep(sleep_duration)
-                    return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
-                except (ValueError, TypeError):
-                    pass
+            remaining = e.response.headers.get('x-user-limit-24hour-remaining', '1')
+            reset_time_header = e.response.headers.get('x-user-limit-24hour-reset')
+            
+            if remaining == '0' and reset_time_header:
+                reset_time = int(reset_time_header)
+                daily_tweet_limit_exhausted = True
+                daily_limit_reset_time = reset_time
+                hours_until_reset = (reset_time - int(time.time())) / 3600
+                
+                logger.warning(f"🚫 DAILY TWEET LIMIT EXHAUSTED (100/100 used)")
+                logger.warning(f"⏰ Resets in {hours_until_reset:.1f} hours at timestamp {reset_time}")
+                logger.warning(f"🔄 Bot will continue likes/retweets/follows but skip ALL tweets until reset")
+                
+                return None  # Return None instead of sleeping
+        
+        # Try to parse regular rate limit reset from headers
+        reset_time = None
+        reset_header = e.response.headers.get('x-rate-limit-reset')
+        if reset_header:
+            try:
+                reset_time = int(reset_header)
+                sleep_duration = max(reset_time - int(time.time()) + 10, 60)  # Add 10s buffer
+                logger.warning(f"15-min rate limit hit, sleeping for {sleep_duration}s")
+                await asyncio.sleep(sleep_duration)
+                return await safe_api_call(fn, timestamps_queue, limit, *args, **kwargs)
+            except (ValueError, TypeError):
+                pass
         
         # Fallback: sleep for 15 minutes
         logger.warning("Sleeping for 15 minutes due to rate limit")
@@ -288,6 +319,15 @@ async def safe_search(fn, search_type='general', *args, **kwargs):
     return result
 
 async def safe_tweet(text: str, media_id=None, action_type='mentions', **kwargs):
+    global daily_tweet_limit_exhausted
+    
+    # Check if daily limit is exhausted
+    check_daily_limit_exhaustion()
+    
+    if daily_tweet_limit_exhausted:
+        logger.info(f"⏭️ Skipping tweet ({action_type}) - daily limit exhausted until reset")
+        return None
+    
     if not can_perform_action(action_type):
         logger.warning(f"Daily limit reached for {action_type}: {get_daily_count(action_type)}")
         return None
@@ -310,9 +350,14 @@ async def safe_tweet(text: str, media_id=None, action_type='mentions', **kwargs)
             lambda t, m, **kw: x_client.create_tweet(text=t, media_ids=[m] if m else None, **kw),
             None, 0, text, media_id, **kwargs
         )
+        
+        if result is None:
+            # Daily limit was hit during the API call
+            return None
+            
         increment_daily_count(action_type)
         increment_15min_count('tweets')
-        logger.info(f"Tweet posted successfully - {action_type} count: {get_daily_count(action_type)}, 15min tweets: {get_15min_count('tweets')}")
+        logger.info(f"✅ Tweet posted successfully - {action_type} count: {get_daily_count(action_type)}, 15min tweets: {get_15min_count('tweets')}")
         return result
     except Exception as e:
         logger.error(f"safe_tweet: Error posting tweet: {e}", exc_info=True)
@@ -862,7 +907,14 @@ async def log_daily_stats():
                 'tweets_15min': get_15min_count('tweets')
             }
             
-            logger.info(f"Daily Stats: {stats} | Total Tweets: {total_tweets}/100")
+            # Add daily limit exhaustion status
+            global daily_tweet_limit_exhausted, daily_limit_reset_time
+            exhaustion_status = ""
+            if daily_tweet_limit_exhausted and daily_limit_reset_time:
+                hours_until_reset = (daily_limit_reset_time - time.time()) / 3600
+                exhaustion_status = f" | 🚫 TWEETS DISABLED ({hours_until_reset:.1f}h until reset)"
+            
+            logger.info(f"Daily Stats: {stats} | Total Tweets: {total_tweets}/100{exhaustion_status}")
             logger.info(f"15-min Stats: {fifteen_min_stats}")
             
         except Exception as e:
@@ -882,6 +934,11 @@ async def main():
     logger.info("- Search: 60 per 15min, Mentions: 10 per 15min")
     logger.info("- Retweets/Follows: 5 per 15min each")
     logger.info("- Likes: 200 per 24 hours")
+    logger.info("")
+    logger.info("🔧 ENHANCED DAILY LIMIT HANDLING:")
+    logger.info("- Bot will automatically detect daily limit exhaustion")
+    logger.info("- Continue likes/retweets/follows but skip ALL tweets until reset")
+    logger.info("- No more wasted 15-minute sleeps on exhausted limits")
     logger.info("")
     logger.info("Search intervals:")
     logger.info("- Mentions: every 2.5min (6/15min, under 10 limit)")

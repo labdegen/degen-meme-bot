@@ -100,22 +100,24 @@ CRYPTO_SEARCH_TERMS = [
     "solana traders"
 ]
 
-# Updated daily limits for Basic tier
+# Updated daily limits for Basic tier (from official X API docs)
 DAILY_TWEET_LIMITS = {
-    'main_posts': 6,        # Every 4 hours
-    'crypto_bullposts': 20, # Reduced from 24 
-    'mentions': 50,         # Reduced from 70
-    'likes': 200,          # Keep at 200
-    'retweets': 80,        # Reduced from 100
-    'follows': 40,         # Reduced from 50
-    'total_tweets': 100    # New: total daily tweet limit
+    'main_posts': 4,        # Every 6 hours = 4 per day
+    'crypto_bullposts': 12, # Conservative for 100/day limit  
+    'mentions': 30,         # Most tweets should be mention replies
+    'likes': 200,          # Official limit: 200/24hrs
+    'retweets': 80,        # Calculated: 5 per 15min * 96 periods = 480, but be conservative
+    'follows': 80,         # Calculated: 5 per 15min * 96 periods = 480, but be conservative
+    'total_tweets': 100    # Official limit: 100 tweets/24hrs PER USER
 }
 
-# 15-minute rate limits for actions
+# 15-minute rate limits for actions (from official X API docs)
 FIFTEEN_MIN_LIMITS = {
-    'retweets': 5,         # Conservative: 5 per 15min
-    'follows': 3,          # Conservative: 3 per 15min
-    'searches': 9          # Conservative: 9 per 15min (under 10)
+    'retweets': 5,         # Official: 5 per 15min
+    'follows': 5,          # Official: 5 per 15min  
+    'searches': 50,        # Official: 60 per 15min, but be conservative
+    'mentions_search': 10, # Official: 10 per 15min for mentions endpoint
+    'tweets': 4            # Conservative: spread 100 daily tweets across day (4 per 15min max)
 }
 
 # Helpers
@@ -263,15 +265,25 @@ async def safe_api_call(fn, timestamps_queue, limit, *args, **kwargs):
         logger.error(f"API call error: {e}", exc_info=True)
         raise e
 
-async def safe_search(fn, *args, **kwargs):
-    if not can_perform_15min_action('searches'):
-        logger.warning(f"15-minute search limit reached: {get_15min_count('searches')}")
-        return None
+async def safe_search(fn, search_type='general', *args, **kwargs):
+    # Different limits for different search types
+    if search_type == 'mentions':
+        if not can_perform_15min_action('mentions_search'):
+            logger.warning(f"15-minute mentions search limit reached: {get_15min_count('mentions_search')}")
+            return None
+    else:
+        if not can_perform_15min_action('searches'):
+            logger.warning(f"15-minute search limit reached: {get_15min_count('searches')}")
+            return None
     
     result = await safe_api_call(fn, None, 0, *args, **kwargs)
     if result:
-        increment_15min_count('searches')
-        logger.info(f"Search completed - 15min count: {get_15min_count('searches')}")
+        if search_type == 'mentions':
+            increment_15min_count('mentions_search')
+            logger.info(f"Mentions search completed - 15min count: {get_15min_count('mentions_search')}")
+        else:
+            increment_15min_count('searches')
+            logger.info(f"Search completed - 15min count: {get_15min_count('searches')}")
     return result
 
 async def safe_tweet(text: str, media_id=None, action_type='mentions', **kwargs):
@@ -285,6 +297,10 @@ async def safe_tweet(text: str, media_id=None, action_type='mentions', **kwargs)
                        get_daily_count('mentions'))
         logger.warning(f"Daily total tweet limit reached: {total_tweets}")
         return None
+    
+    if not can_perform_15min_action('tweets'):
+        logger.warning(f"15-minute tweet limit reached: {get_15min_count('tweets')}")
+        return None
         
     logger.info(f"safe_tweet: Attempting to tweet ({len(text)} chars) - Type: {action_type}")
     
@@ -294,7 +310,8 @@ async def safe_tweet(text: str, media_id=None, action_type='mentions', **kwargs)
             None, 0, text, media_id, **kwargs
         )
         increment_daily_count(action_type)
-        logger.info(f"Tweet posted successfully - {action_type} count: {get_daily_count(action_type)}")
+        increment_15min_count('tweets')
+        logger.info(f"Tweet posted successfully - {action_type} count: {get_daily_count(action_type)}, 15min tweets: {get_15min_count('tweets')}")
         return result
     except Exception as e:
         logger.error(f"safe_tweet: Error posting tweet: {e}", exc_info=True)
@@ -412,6 +429,12 @@ def build_dex_reply(addr: str) -> str:
 async def post_crypto_bullpost(tweet, is_mention=False):
     """Post a crypto bullpost reply with meme"""
     try:
+        # Check 15-minute tweet limit before proceeding
+        if not can_perform_15min_action('tweets'):
+            logger.warning(f"15-minute tweet limit reached, skipping bullpost for tweet {tweet.id}")
+            redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tweet.id))
+            return
+            
         convo_id = tweet.conversation_id or tweet.id
         history = get_thread_history(convo_id) if is_mention else ""
         
@@ -451,6 +474,12 @@ async def post_crypto_bullpost(tweet, is_mention=False):
 async def handle_mention(tw):
     """Handle @mentions to the bot"""
     try:
+        # Check 15-minute tweet limit at the start
+        if not can_perform_15min_action('tweets'):
+            logger.warning(f"15-minute tweet limit reached, skipping mention {tw.id}")
+            redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
+            return
+            
         convo_id = tw.conversation_id or tw.id
         if redis_client.hget(get_thread_key(convo_id), "count") is None:
             try:
@@ -555,7 +584,7 @@ async def search_mentions_loop():
                 "max_results": 10
             }
             
-            search_results = await safe_search(x_client.search_recent_tweets, **search_params)
+            search_results = await safe_search(x_client.search_recent_tweets, 'mentions', **search_params)
             if search_results:
                 logger.info("Successfully searched for mentions")
             
@@ -574,7 +603,7 @@ async def search_mentions_loop():
         except Exception as e:
             logger.error(f"Search mentions loop error: {e}", exc_info=True)
         
-        await asyncio.sleep(240)  # Every 4 minutes (3.75 calls per 15min)
+        await asyncio.sleep(150)  # Every 2.5 minutes (6 calls per 15min, under 10 limit)
 
 async def crypto_engagement_loop():
     """Find and engage with crypto posts"""
@@ -596,7 +625,7 @@ async def crypto_engagement_loop():
                 "max_results": 10
             }
             
-            res = await safe_search(x_client.search_recent_tweets, **params)
+            res = await safe_search(x_client.search_recent_tweets, 'general', **params)
             
             if res and res.data:
                 # Sort by engagement potential (mix of follower count and recent activity)
@@ -637,34 +666,34 @@ async def crypto_engagement_loop():
                 
                 for tw, user, score in posts_with_scores[:3]:  # Top 3 posts
                     try:
-                        # Different engagement strategies
-                        engagement_choice = randint(1, 10)
+                        # Very conservative engagement due to 100 tweets/day limit
+                        engagement_choice = randint(1, 20)
                         
-                        if engagement_choice <= 2:  # 20% chance - Bullpost reply (reduced from 30%)
-                            if can_perform_action('crypto_bullposts'):
+                        if engagement_choice == 1:  # 5% chance - Bullpost reply (very reduced)
+                            if can_perform_action('crypto_bullposts') and can_perform_15min_action('tweets'):
                                 logger.info(f"Posting crypto bullpost on tweet {tw.id} from @{user.username}")
                                 await post_crypto_bullpost(tw, is_mention=False)
                         
-                        elif engagement_choice <= 5:  # 30% chance - Like + potential retweet
+                        elif engagement_choice <= 8:  # 35% chance - Like + potential retweet
                             await safe_like(str(tw.id))
-                            if randint(1, 4) == 1:  # 25% of likes also get retweeted (reduced from 33%)
+                            if randint(1, 5) == 1:  # 20% of likes also get retweeted
                                 await safe_retweet(str(tw.id))
                         
-                        elif engagement_choice <= 7:  # 20% chance - Just like
+                        elif engagement_choice <= 12:  # 20% chance - Just like
                             await safe_like(str(tw.id))
                         
-                        # 30% chance - no action (just observe)
+                        # 40% chance - no action (just observe)
                         
                         # Consider following active accounts with good engagement
                         if (user.public_metrics.get('followers_count', 0) < 10000 and 
-                            randint(1, 25) == 1):  # 4% chance to follow (reduced from 5%)
+                            randint(1, 50) == 1):  # 2% chance to follow (very reduced)
                             await safe_follow(str(user.id))
                         
                         # Mark as processed
                         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
                         
-                        # Small delay between actions
-                        await asyncio.sleep(2)
+                        # Small delay between tweet attempts to spread them out
+                        await asyncio.sleep(5)
                         
                     except Exception as e:
                         logger.error(f"Error engaging with tweet {tw.id}: {e}")
@@ -673,7 +702,7 @@ async def crypto_engagement_loop():
         except Exception as e:
             logger.error(f"crypto_engagement_loop error: {e}", exc_info=True)
         
-        await asyncio.sleep(1200)  # Every 20 minutes (0.75 calls per 15min)
+        await asyncio.sleep(900)  # Every 15 minutes (1 call per 15min)
 
 async def ogdegen_monitor_loop():
     """Monitor and retweet @ogdegenonsol posts"""
@@ -691,7 +720,7 @@ async def ogdegen_monitor_loop():
                 "max_results": 10
             }
             
-            res = await safe_search(x_client.search_recent_tweets, **params)
+            res = await safe_search(x_client.search_recent_tweets, 'general', **params)
             
             if res and res.data:
                 newest = max(int(t.id) for t in res.data)
@@ -707,7 +736,7 @@ async def ogdegen_monitor_loop():
         except Exception as e:
             logger.error(f"ogdegen_monitor_loop error: {e}")
         
-        await asyncio.sleep(450)  # Every 7.5 minutes (2 calls per 15min)
+        await asyncio.sleep(300)  # Every 5 minutes (3 calls per 15min)
 
 async def contract_monitor_loop():
     """Monitor tweets mentioning the contract address"""
@@ -725,7 +754,7 @@ async def contract_monitor_loop():
                 "max_results": 10
             }
             
-            res = await safe_search(x_client.search_recent_tweets, **params)
+            res = await safe_search(x_client.search_recent_tweets, 'general', **params)
             
             if res and res.data:
                 newest = max(int(t.id) for t in res.data)
@@ -736,8 +765,8 @@ async def contract_monitor_loop():
                     # Like all contract mentions
                     await safe_like(str(tw.id))
                     
-                    # Retweet some of them (40% chance, reduced from 50%)
-                    if randint(1, 5) <= 2:
+                    # Retweet some of them (30% chance, reduced from 40%)
+                    if randint(1, 10) <= 3:
                         await safe_retweet(str(tw.id))
                     
                     logger.info(f"Engaged with contract mention: {tw.id}")
@@ -747,10 +776,10 @@ async def contract_monitor_loop():
         except Exception as e:
             logger.error(f"contract_monitor_loop error: {e}")
         
-        await asyncio.sleep(750)  # Every 12.5 minutes (1.2 calls per 15min)
+        await asyncio.sleep(450)  # Every 7.5 minutes (2 calls per 15min)
 
 async def main_post_loop():
-    """Main account posts every 4 hours"""
+    """Main account posts every 6 hours"""
     grok_prompts = [
         "Write a positive one-sentence analytical update on $DEGEN using recent market data. Do not mention the contract address. No slang. High class but a little edgy like Don Draper.",
         "Write a positive one-sentence hot take on $DEGEN's price action. Be edgy and risky. Do not mention the contract address. No slang. High class but a little edgy like Don Draper.",
@@ -807,7 +836,7 @@ async def main_post_loop():
         except Exception as e:
             logger.error(f"Main post error: {e}", exc_info=True)
             
-        await asyncio.sleep(14400)  # Every 4 hours
+        await asyncio.sleep(21600)  # Every 6 hours (4 posts per day max to save tweets for interactions)
 
 async def log_daily_stats():
     """Log daily statistics every hour"""
@@ -826,8 +855,10 @@ async def log_daily_stats():
             
             fifteen_min_stats = {
                 'searches': get_15min_count('searches'),
+                'mentions_search': get_15min_count('mentions_search'),
                 'retweets_15min': get_15min_count('retweets'),
-                'follows_15min': get_15min_count('follows')
+                'follows_15min': get_15min_count('follows'),
+                'tweets_15min': get_15min_count('tweets')
             }
             
             logger.info(f"Daily Stats: {stats} | Total Tweets: {total_tweets}/100")
@@ -844,13 +875,20 @@ async def main():
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tweet_id)
         logger.info(f"Pre-marked blocked tweet ID {tweet_id} as replied")
     
-    logger.info("Starting all loops with rate limiting...")
-    logger.info("Search intervals adjusted for <10 calls per 15min:")
-    logger.info("- Mentions: every 4min (3.75/15min)")
-    logger.info("- Crypto engagement: every 20min (0.75/15min)")
-    logger.info("- OGdegen monitor: every 7.5min (2/15min)")
-    logger.info("- Contract monitor: every 12.5min (1.2/15min)")
-    logger.info("Total: ~7.7 searches per 15min")
+    logger.info("Starting all loops with OFFICIAL X API rate limits...")
+    logger.info("Based on X API Basic tier documentation:")
+    logger.info("- Tweets: 100 per 24 hours TOTAL")
+    logger.info("- Search: 60 per 15min, Mentions: 10 per 15min")
+    logger.info("- Retweets/Follows: 5 per 15min each")
+    logger.info("- Likes: 200 per 24 hours")
+    logger.info("")
+    logger.info("Search intervals:")
+    logger.info("- Mentions: every 2.5min (6/15min, under 10 limit)")
+    logger.info("- Crypto engagement: every 15min (1/15min)")
+    logger.info("- OGdegen monitor: every 5min (3/15min)")
+    logger.info("- Contract monitor: every 7.5min (2/15min)")
+    logger.info("Total: ~12 searches per 15min (under 60 limit)")
+    logger.info("Tweet limit: 4 per 15min (to spread 100 daily tweets)")
     
     await asyncio.gather(
         search_mentions_loop(),

@@ -199,6 +199,10 @@ def can_post_tweet():
                    get_daily_count('mentions'))
     return total_tweets < DAILY_TWEET_LIMITS['total_tweets']
 
+def contains_degen_contract(text: str) -> bool:
+    """Check if tweet contains DEGEN contract address"""
+    return DEGEN_ADDR in text
+
 # Global flag to track daily tweet limit exhaustion
 daily_tweet_limit_exhausted = False
 daily_limit_reset_time = None
@@ -380,13 +384,26 @@ async def safe_like(tweet_id: str):
         logger.error(f"Error liking tweet: {e}")
         return None
 
-async def safe_retweet(tweet_id: str):
+async def safe_retweet(tweet_id: str, require_contract_address: bool = False, tweet_text: str = ""):
+    """
+    Safe retweet function with optional contract address requirement
+    
+    Args:
+        tweet_id: ID of tweet to retweet
+        require_contract_address: If True, only retweet if tweet contains DEGEN contract address
+        tweet_text: Text content of the tweet (for contract address checking)
+    """
     if not can_perform_action('retweets'):
         logger.info(f"Daily retweet limit reached: {get_daily_count('retweets')}")
         return None
     
     if not can_perform_15min_action('retweets'):
         logger.info(f"15-minute retweet limit reached: {get_15min_count('retweets')}")
+        return None
+    
+    # Check for contract address requirement
+    if require_contract_address and not contains_degen_contract(tweet_text):
+        logger.info(f"Skipping retweet of {tweet_id} - does not contain DEGEN contract address")
         return None
         
     try:
@@ -652,7 +669,7 @@ async def search_mentions_loop():
         await asyncio.sleep(150)  # Every 2.5 minutes (6 calls per 15min, under 10 limit)
 
 async def crypto_engagement_loop():
-    """Find and engage with crypto posts"""
+    """Find and engage with crypto posts - ONLY retweet if contains DEGEN contract address"""
     search_term_index = 0
     
     while True:
@@ -722,8 +739,9 @@ async def crypto_engagement_loop():
                         
                         elif engagement_choice <= 8:  # 35% chance - Like + potential retweet
                             await safe_like(str(tw.id))
+                            # UPDATED: Only retweet if tweet contains DEGEN contract address
                             if randint(1, 5) == 1:  # 20% of likes also get retweeted
-                                await safe_retweet(str(tw.id))
+                                await safe_retweet(str(tw.id), require_contract_address=True, tweet_text=tw.text)
                         
                         elif engagement_choice <= 12:  # 20% chance - Just like
                             await safe_like(str(tw.id))
@@ -771,7 +789,7 @@ async def ogdegen_monitor_loop():
             if res and res.data:
                 newest = max(int(t.id) for t in res.data)
                 for tw in res.data:
-                    # Always retweet ogdegen posts
+                    # Always retweet ogdegen posts (no contract address requirement)
                     await safe_retweet(str(tw.id))
                     # Also like them
                     await safe_like(str(tw.id))
@@ -812,6 +830,7 @@ async def contract_monitor_loop():
                     await safe_like(str(tw.id))
                     
                     # Retweet some of them (30% chance, reduced from 40%)
+                    # No need to check contract address here since query already filters for it
                     if randint(1, 10) <= 3:
                         await safe_retweet(str(tw.id))
                     
@@ -939,6 +958,11 @@ async def main():
     logger.info("- Bot will automatically detect daily limit exhaustion")
     logger.info("- Continue likes/retweets/follows but skip ALL tweets until reset")
     logger.info("- No more wasted 15-minute sleeps on exhausted limits")
+    logger.info("")
+    logger.info("🎯 RETWEET FILTERING:")
+    logger.info("- Crypto engagement loop: ONLY retweets tweets containing DEGEN contract address")
+    logger.info("- @ogdegenonsol posts: Always retweeted (no filter)")
+    logger.info("- Contract mentions: Always retweeted (already filtered by search)")
     logger.info("")
     logger.info("Search intervals:")
     logger.info("- Mentions: every 2.5min (6/15min, under 10 limit)")

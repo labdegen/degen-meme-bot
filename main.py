@@ -102,9 +102,9 @@ CRYPTO_SEARCH_TERMS = [
 
 # Updated daily limits for Basic tier (from official X API docs)
 DAILY_TWEET_LIMITS = {
-    'main_posts': 4,        # Every 6 hours = 4 per day
+    'main_posts': 18,        # Every 6 hours = 4 per day
     'crypto_bullposts': 12, # Conservative for 100/day limit  
-    'mentions': 30,         # Most tweets should be mention replies
+    'mentions': 50,         # Most tweets should be mention replies
     'likes': 200,          # Official limit: 200/24hrs
     'retweets': 80,        # Calculated: 5 per 15min * 96 periods = 480, but be conservative
     'follows': 80,         # Calculated: 5 per 15min * 96 periods = 480, but be conservative
@@ -844,65 +844,128 @@ async def contract_monitor_loop():
         await asyncio.sleep(450)  # Every 7.5 minutes (2 calls per 15min)
 
 async def main_post_loop():
-    """Main account posts every 6 hours"""
-    grok_prompts = [
-        "Write a positive one-sentence analytical update on $DEGEN using recent market data. Do not mention the contract address. No slang. High class but a little edgy like Don Draper.",
-        "Write a positive one-sentence hot take on $DEGEN's price action. Be edgy and risky. Do not mention the contract address. No slang. High class but a little edgy like Don Draper.",
-        "Write a one sentence, cryptic message about $DEGEN that implies insider knowledge. Do not mention the contract address. No slang. High class but a little edgy like David Foster Wallace.",
-        "Write a one sentence, savage comment about people who haven't bought $DEGEN yet. Do not mention the contract address. No slang. High class but a little edgy like Elon Musk.",
-        "Write a one sentence comparing $DEGEN to the broader crypto market. Do not mention the contract address. No slang. High class but a little edgy like Hemingway.",
-        "Write a one sentence post about diamond hands and $DEGEN's future potential. Do not mention the contract address. No slang. High class but a little edgy like Hunter Thompson."
+    """Main account posts every 80 minutes (18 times per day) with DFW-style content"""
+    
+    # DFW-style prompts focusing on crypto gambling lifestyle themes
+    dfw_prompts = [
+        "Write a David Foster Wallace-style tweet about $DEGEN and the crypto gambling trenches. Focus on risk as a sacrament. Be subversive, mysterious, dense with metaphor. No slang. No contract address.",
+        
+        "Channel David Foster Wallace to write about $DEGEN trading as existential warfare against doubt. Themes: boldness, strategy, outsmarting enemies. Be introspective and chaotic. No slang. No contract address.",
+        
+        "Write a DFW-style tweet about $DEGEN and life-changing money as a state of mind. Focus on the abyss, patience, and rewriting the game. Mysterious and philosophical. No slang. No contract address.",
+        
+        "David Foster Wallace style: $DEGEN lifestyle as a paradox of freefalling with focus. Themes: volatility surfing, monk-like concentration, middle finger to conventional thinking. No slang. No contract address.",
+        
+        "DFW-style tweet about $DEGEN traders as rogue alchemists in the Solana crucible. Focus on transmuting fear to fortune, leveraged rebellion against entropy. Subversive and dense. No slang. No contract address.",
+        
+        "Write like David Foster Wallace about $DEGEN as blockchain graffiti manifesto. Themes: rewriting rules while enemies sleep, war paint strategy, battle cry risk. Mysterious cult-like tone. No slang. No contract address.",
+        
+        "DFW-style: $DEGEN gambling as neon-lit altar worship. Focus on blockchain gods, trembling doubt as the real enemy, moon or dust sacrament. Existential and edgy. No slang. No contract address.",
+        
+        "Channel Wallace: $DEGEN ecosystem where focus is a blade honed in dark chart hours. Themes: FUD as siren call, paper hands whispers, one wallet moonshot philosophy. No slang. No contract address.",
+        
+        "David Foster Wallace style about $DEGEN mempool haunting at 2 AM. Focus on bloodshot signal-chasing, 100x dreams, absurd alchemy of nerve. Chaotic and introspective. No slang. No contract address.",
+        
+        "DFW-style tweet: $DEGEN trading as fevered dance with chaos, maps drawn in disappearing ink. Themes: outsmarting whales, sidesteping bots, laughing at betrayal. No slang. No contract address.",
+        
+        "Write like Wallace about $DEGEN trenches teaching life-changing nerve. Focus on looking inward for enemies, leverage as universe-daring, entropy defiance. Philosophical and edgy. No slang. No contract address.",
+        
+        "DFW-style: $DEGEN lifestyle as casino coded in Rust where hesitation is house edge. Themes: math as fevered strategy, whispering HODLers vs bold game-changers. No slang. No contract address.",
+        
+        "Channel David Foster Wallace: $DEGEN as freedom glimpse in the abyss. Focus on patient stalking vs chasing, misclick consequences, rewriting game rules. Mysterious and dense. No slang. No contract address.",
+        
+        "Wallace-style tweet about $DEGEN gambling as spiritual middle finger to suits and skeptics. Themes: volatility surfing, monk focus paradox, safe-play voice as enemy. No slang. No contract address.",
+        
+        "DFW-style: $DEGEN traders don't sleep, they haunt Solana seeking signals in noise. Focus on 2 AM YOLO funding dreams, boldness as only currency. Subversive and chaotic. No slang. No contract address."
     ]
     
-    hour_counter = 0
-    logger.info("Starting main_post_loop...")
+    # Theme categories to track and rotate through
+    theme_categories = [
+        "risk_sacrament", "existential_warfare", "life_changing_mindset", "volatility_paradox", 
+        "alchemy_rebellion", "manifesto_graffiti", "altar_worship", "focus_blade",
+        "mempool_haunting", "chaos_dance", "nerve_teaching", "rust_casino",
+        "abyss_freedom", "spiritual_resistance", "signal_hunting"
+    ]
+    
+    post_counter = 0
+    logger.info("Starting main_post_loop with DFW-style content (18 posts/day)...")
 
     while True:
         try:
             if can_perform_action('main_posts') and can_post_tweet():
-                logger.info(f"Main post attempt #{hour_counter + 1}")
+                logger.info(f"Main DFW post attempt #{post_counter + 1}")
                 
-                # Fetch market data
-                data = fetch_data(DEGEN_ADDR)
-                if data:
-                    metrics = format_metrics(data)
-                    dex_link = data.get('link', f"https://dexscreener.com/solana/{DEGEN_ADDR}")
+                # Get current theme category and mark as used
+                current_theme = theme_categories[post_counter % len(theme_categories)]
+                today_key = f"{REDIS_PREFIX}themes_used:{time.strftime('%Y-%m-%d')}"
+                
+                # Check if this theme was used today
+                theme_used_count = redis_client.hget(today_key, current_theme)
+                theme_used_count = int(theme_used_count) if theme_used_count else 0
+                
+                # If theme used more than once today, try next themes until we find a less-used one
+                attempts = 0
+                while theme_used_count >= 2 and attempts < len(theme_categories):
+                    post_counter += 1
+                    attempts += 1
+                    current_theme = theme_categories[post_counter % len(theme_categories)]
+                    theme_used_count = redis_client.hget(today_key, current_theme)
+                    theme_used_count = int(theme_used_count) if theme_used_count else 0
+                
+                # Select prompt based on current theme
+                prompt_index = post_counter % len(dfw_prompts)
+                selected_prompt = dfw_prompts[prompt_index]
+                
+                # Add theme context to prompt
+                enhanced_prompt = f"{selected_prompt} Theme focus: {current_theme.replace('_', ' ')}."
+                
+                # Ask Grok for content
+                raw_content = ask_grok(enhanced_prompt).strip()
+                
+                # Build final tweet - just the content + DEGEN mentions
+                tweet = f"{raw_content}\n\n$DEGEN"
+                
+                # Ensure we don't exceed character limits
+                if len(tweet) > 270:
+                    tweet = truncate_to_sentence(raw_content, 240) + "\n\n$DEGEN"
+                
+                # Only post if different from recent posts
+                recent_posts_key = f"{REDIS_PREFIX}recent_main_posts"
+                recent_posts = redis_client.lrange(recent_posts_key, 0, 4)  # Check last 5 posts
+                
+                if tweet not in recent_posts:
+                    result = await safe_tweet(tweet, action_type='main_posts')
+                    
+                    if result:  # Only update tracking if tweet was successful
+                        # Track recent posts (keep last 10)
+                        redis_client.lpush(recent_posts_key, tweet)
+                        redis_client.ltrim(recent_posts_key, 0, 9)
+                        redis_client.expire(recent_posts_key, 86400)
+                        
+                        # Track theme usage for today
+                        redis_client.hincrby(today_key, current_theme, 1)
+                        redis_client.expire(today_key, 86400)
+                        
+                        logger.info(f"DFW-style main post published! Theme: {current_theme}")
+                    
+                else:
+                    logger.info("Skipping duplicate content, will try different theme next time")
 
-                    # Ask Grok for content
-                    selected_prompt = grok_prompts[hour_counter % len(grok_prompts)]
-                    raw = ask_grok(selected_prompt).strip()
-
-                    # Build tweet
-                    tweet = (
-                        metrics.rstrip() +
-                        "\n\n" +
-                        raw +
-                        "\n\n" +
-                        dex_link
-                    )
-
-                    # Only post if different from last
-                    last = redis_client.get(f"{REDIS_PREFIX}last_main_post")
-                    if tweet != last:
-                        await safe_tweet(tweet, action_type='main_posts')
-                        redis_client.set(f"{REDIS_PREFIX}last_main_post", tweet)
-                        logger.info("Main post published successfully!")
-
-                hour_counter += 1
+                post_counter += 1
+                
             else:
                 if not can_perform_action('main_posts'):
-                    logger.info(f"Main post limit reached: {get_daily_count('main_posts')}")
+                    logger.info(f"Main post limit reached: {get_daily_count('main_posts')}/18")
                 if not can_post_tweet():
                     total_tweets = (get_daily_count('main_posts') + 
                                    get_daily_count('crypto_bullposts') + 
                                    get_daily_count('mentions'))
-                    logger.info(f"Total tweet limit reached: {total_tweets}")
+                    logger.info(f"Total tweet limit reached: {total_tweets}/100")
                 
         except Exception as e:
             logger.error(f"Main post error: {e}", exc_info=True)
             
-        await asyncio.sleep(21600)  # Every 6 hours (4 posts per day max to save tweets for interactions)
-
+        await asyncio.sleep(4800) 
 async def log_daily_stats():
     """Log daily statistics every hour"""
     while True:

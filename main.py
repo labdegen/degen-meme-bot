@@ -848,35 +848,10 @@ async def main_post_loop():
     
     # DFW-style prompts focusing on crypto gambling lifestyle themes
     dfw_prompts = [
-        "Write a David Foster Wallace-style tweet about $DEGEN and the crypto gambling trenches. Focus on risk as a sacrament. Be subversive, mysterious, dense with metaphor. No slang. No contract address.",
-        
-        "Channel David Foster Wallace to write about $DEGEN trading as existential warfare against doubt. Themes: boldness, strategy, outsmarting enemies. Be introspective and chaotic. No slang. No contract address.",
-        
-        "Write a DFW-style tweet about $DEGEN and life-changing money as a state of mind. Focus on the abyss, patience, and rewriting the game. Mysterious and philosophical. No slang. No contract address.",
-        
-        "David Foster Wallace style: $DEGEN lifestyle as a paradox of freefalling with focus. Themes: volatility surfing, monk-like concentration, middle finger to conventional thinking. No slang. No contract address.",
-        
-        "DFW-style tweet about $DEGEN traders as rogue alchemists in the Solana crucible. Focus on transmuting fear to fortune, leveraged rebellion against entropy. Subversive and dense. No slang. No contract address.",
-        
-        "Write like David Foster Wallace about $DEGEN as blockchain graffiti manifesto. Themes: rewriting rules while enemies sleep, war paint strategy, battle cry risk. Mysterious cult-like tone. No slang. No contract address.",
-        
-        "DFW-style: $DEGEN gambling as neon-lit altar worship. Focus on blockchain gods, trembling doubt as the real enemy, moon or dust sacrament. Existential and edgy. No slang. No contract address.",
-        
-        "Channel Wallace: $DEGEN ecosystem where focus is a blade honed in dark chart hours. Themes: FUD as siren call, paper hands whispers, one wallet moonshot philosophy. No slang. No contract address.",
-        
-        "David Foster Wallace style about $DEGEN mempool haunting at 2 AM. Focus on bloodshot signal-chasing, 100x dreams, absurd alchemy of nerve. Chaotic and introspective. No slang. No contract address.",
-        
-        "DFW-style tweet: $DEGEN trading as fevered dance with chaos, maps drawn in disappearing ink. Themes: outsmarting whales, sidesteping bots, laughing at betrayal. No slang. No contract address.",
-        
-        "Write like Wallace about $DEGEN trenches teaching life-changing nerve. Focus on looking inward for enemies, leverage as universe-daring, entropy defiance. Philosophical and edgy. No slang. No contract address.",
-        
-        "DFW-style: $DEGEN lifestyle as casino coded in Rust where hesitation is house edge. Themes: math as fevered strategy, whispering HODLers vs bold game-changers. No slang. No contract address.",
-        
-        "Channel David Foster Wallace: $DEGEN as freedom glimpse in the abyss. Focus on patient stalking vs chasing, misclick consequences, rewriting game rules. Mysterious and dense. No slang. No contract address.",
-        
-        "Wallace-style tweet about $DEGEN gambling as spiritual middle finger to suits and skeptics. Themes: volatility surfing, monk focus paradox, safe-play voice as enemy. No slang. No contract address.",
-        
-        "DFW-style: $DEGEN traders don't sleep, they haunt Solana seeking signals in noise. Focus on 2 AM YOLO funding dreams, boldness as only currency. Subversive and chaotic. No slang. No contract address."
+        "Write a short one sentence David Foster Wallace-style tweet about $DEGEN and the crypto gambling trenches. Focus on risk, strategy, psychology. Be cryptic subversive, mysterious. No slang. Include contract address.",
+
+"Write a short one sentence Elon Musk-style tweet about $DEGEN and the crypto gambling trenches. Focus on risk, strategy, psychology. Be cryptic subversive, mysterious. No slang. Include contract address."
+
     ]
     
     # Theme categories to track and rotate through

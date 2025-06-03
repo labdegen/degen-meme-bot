@@ -848,9 +848,19 @@ async def main_post_loop():
     
     # DFW-style prompts focusing on crypto gambling lifestyle themes
     dfw_prompts = [
-        "Write a short one sentence David Foster Wallace-style tweet about $DEGEN, possible themes include crypto gambling, the matrix, freedom. Focus on risk, strategy, psychology. Be cryptic subversive, mysterious. No slang. No contract address.",
 
-"Write a short one sentence Elon Musk-style tweet about $DEGEN and the crypto gambling trenches. Focus on risk, strategy, psychology. Be cryptic subversive, mysterious. No slang. No contract address."
+"Write a short one sentence Carl Sagan-style tweet about $DEGEN and crypto, decentralization and freedom. No slang. No contract address. Do not repeat content of themes from previous posts.",
+
+"Write a short one sentence Steve Jobs-style tweet about $DEGEN and technology. No slang. No contract address. Do not repeat content of themes from previous posts.",
+
+	"Write a short one sentence Elon Musk-style tweet about $DEGEN and crypto. Focus on risk, strategy, psychology. No slang. No contract address. Do not repeat content of themes from previous posts.",
+
+"Write a short one sentence Steve Jobs-style tweet about $DEGEN and decentralization. No slang. No contract address. Do not repeat content of themes from previous posts.",
+
+
+        "Write a short one sentence David Foster Wallace-style tweet about $DEGEN, possible themes include ai, the matrix, freedom. Focus on risk, strategy, psychology. Be cryptic subversive, mysterious. No slang. No contract address. Do not repeat content of themes from previous posts.",
+
+"Write a short one sentence Elon Musk-style tweet about $DEGEN and crypto. Focus on risk, strategy, psychology. Be cryptic subversive, mysterious. No slang. No contract address. Do not repeat content of themes from previous posts.",
 
     ]
     

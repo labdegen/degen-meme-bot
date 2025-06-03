@@ -969,7 +969,7 @@ CONTEXT: You've built a platform that analyzes social sentiment, tracks KOLs, de
                     continue
                 
                 # Extract key concepts for tracking
-                key_concepts = self._extract_key_concepts(raw_content)
+                key_concepts = extract_key_concepts(raw_content)
                 
                 # Build final tweet
                 tweet = f"{raw_content}\n\n$DEGEN"
@@ -979,7 +979,7 @@ CONTEXT: You've built a platform that analyzes social sentiment, tracks KOLs, de
                     tweet = truncate_to_sentence(raw_content, 240) + "\n\n$DEGEN"
                 
                 # Check against recent posts for similarity
-                if self._is_content_too_similar(tweet, recent_posts):
+                if is_content_too_similar(tweet, recent_posts):
                     logger.info("Content too similar to recent posts, trying different theme")
                     post_counter += 1
                     continue
@@ -1029,12 +1029,14 @@ CONTEXT: You've built a platform that analyzes social sentiment, tracks KOLs, de
             
         await asyncio.sleep(4800)  # 80 minutes
 
-def _extract_key_concepts(self, content: str) -> List[str]:
+# Add these helper functions outside of any class (at module level)
+def extract_key_concepts(content: str) -> list:
     """Extract key concepts from tweet content to track and avoid repetition"""
+    import re
+    
     # Remove common words and extract meaningful terms
     stop_words = {'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'its', 'our', 'their'}
     
-    import re
     # Extract words, convert to lowercase, filter out stop words and short words
     words = re.findall(r'\b[a-zA-Z]{4,}\b', content.lower())
     concepts = [word for word in words if word not in stop_words and len(word) >= 4]
@@ -1052,7 +1054,7 @@ def _extract_key_concepts(self, content: str) -> List[str]:
     
     return concepts[:5]  # Return top 5 concepts
 
-def _is_content_too_similar(self, new_content: str, recent_posts: List[str]) -> bool:
+def is_content_too_similar(new_content: str, recent_posts: list) -> bool:
     """Check if new content is too similar to recent posts"""
     if not recent_posts:
         return False

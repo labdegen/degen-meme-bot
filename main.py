@@ -13,6 +13,7 @@ from random import choice, randint
 import glob
 import http.client
 from datetime import datetime, timedelta
+import hashlib
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -80,25 +81,6 @@ USERNAME_RE = re.compile(rf"@{BOT_USERNAME}\b", re.IGNORECASE)
 # Set initial search ID
 current_time_ms = int(time.time() * 1000) - 1728000000
 INITIAL_SEARCH_ID = str((current_time_ms << 22))
-
-# Crypto search terms - rotating through different audiences
-CRYPTO_SEARCH_TERMS = [
-    "memecoin OR meme coin",
-    "solana memes", 
-    "crypto degen",
-    "solana gems",
-    "memecoin season",
-    "altcoin gems",
-    "crypto twitter",
-    "degen plays",
-    "solana alpha",
-    "memecoin moonshot",
-    "crypto portfolio", 
-    "solana ecosystem",
-    "defi gems",
-    "crypto gains",
-    "solana traders"
-]
 
 # Updated daily limits for Basic tier (from official X API docs)
 DAILY_TWEET_LIMITS = {
@@ -384,26 +366,13 @@ async def safe_like(tweet_id: str):
         logger.error(f"Error liking tweet: {e}")
         return None
 
-async def safe_retweet(tweet_id: str, require_contract_address: bool = False, tweet_text: str = ""):
-    """
-    Safe retweet function with optional contract address requirement
-    
-    Args:
-        tweet_id: ID of tweet to retweet
-        require_contract_address: If True, only retweet if tweet contains DEGEN contract address
-        tweet_text: Text content of the tweet (for contract address checking)
-    """
+async def safe_retweet(tweet_id: str):
     if not can_perform_action('retweets'):
         logger.info(f"Daily retweet limit reached: {get_daily_count('retweets')}")
         return None
     
     if not can_perform_15min_action('retweets'):
         logger.info(f"15-minute retweet limit reached: {get_15min_count('retweets')}")
-        return None
-    
-    # Check for contract address requirement
-    if require_contract_address and not contains_degen_contract(tweet_text):
-        logger.info(f"Skipping retweet of {tweet_id} - does not contain DEGEN contract address")
         return None
         
     try:
@@ -666,107 +635,79 @@ async def search_mentions_loop():
         except Exception as e:
             logger.error(f"Search mentions loop error: {e}", exc_info=True)
         
-        await asyncio.sleep(150)  # Every 2.5 minutes (6 calls per 15min, under 10 limit)
+        await asyncio.sleep(150)  # Every 2.5 minutes
 
-async def crypto_engagement_loop():
-    """Find and engage with crypto posts - ONLY retweet if contains DEGEN contract address"""
-    search_term_index = 0
+async def contract_engagement_loop():
+    """Find tweets mentioning the contract address and engage with them"""
+    key = f"{REDIS_PREFIX}last_contract_id"
+    if not redis_client.exists(key):
+        redis_client.set(key, INITIAL_SEARCH_ID)
     
     while True:
         try:
-            # Rotate through different search terms
-            search_term = CRYPTO_SEARCH_TERMS[search_term_index % len(CRYPTO_SEARCH_TERMS)]
-            search_term_index += 1
-            
-            logger.info(f"Searching crypto posts with term: {search_term}")
-            
+            last_id = redis_client.get(key)
             params = {
-                "query": f"{search_term} -is:retweet -is:reply",
+                "query": f"{DEGEN_ADDR} -is:retweet -is:reply",
+                "since_id": last_id,
                 "tweet_fields": ["id", "text", "author_id", "public_metrics", "created_at"],
                 "expansions": ["author_id"],
                 "user_fields": ["username", "public_metrics"],
                 "max_results": 10
             }
             
+            logger.info(f"Searching for contract address mentions: {DEGEN_ADDR}")
             res = await safe_search(x_client.search_recent_tweets, 'general', **params)
             
             if res and res.data:
-                # Sort by engagement potential (mix of follower count and recent activity)
-                posts_with_scores = []
-                users_dict = {user.id: user for user in (res.includes.get('users', []))}
+                newest = max(int(t.id) for t in res.data)
+                users_dict = {user.id: user for user in (res.includes.get('users', []))} if res.includes else {}
                 
                 for tw in res.data:
                     if str(tw.id) in BLOCKED_TWEET_IDS:
                         continue
                     if redis_client.sismember(f"{REDIS_PREFIX}replied_ids", str(tw.id)):
                         continue
+                    if tw.author_id == BOT_ID:  # Skip our own tweets
+                        continue
                     
                     user = users_dict.get(tw.author_id)
-                    if not user:
-                        continue
                     
-                    # Skip if it's our own tweet
-                    if tw.author_id == BOT_ID:
-                        continue
-                    
-                    # Engagement score: mix high and low follower accounts
-                    follower_count = user.public_metrics.get('followers_count', 0)
-                    tweet_engagement = (tw.public_metrics.get('like_count', 0) + 
-                                      tw.public_metrics.get('retweet_count', 0) + 
-                                      tw.public_metrics.get('reply_count', 0))
-                    
-                    # Boost score for accounts with 1K-50K followers (sweet spot for engagement)
-                    score = tweet_engagement
-                    if 1000 <= follower_count <= 50000:
-                        score *= 2
-                    elif follower_count < 1000:
-                        score *= 1.5  # Also good for engagement
-                    
-                    posts_with_scores.append((tw, user, score))
-                
-                # Sort by score and take top posts
-                posts_with_scores.sort(key=lambda x: x[2], reverse=True)
-                
-                for tw, user, score in posts_with_scores[:3]:  # Top 3 posts
                     try:
-                        # Very conservative engagement due to 100 tweets/day limit
-                        engagement_choice = randint(1, 20)
+                        # Always like contract mentions
+                        await safe_like(str(tw.id))
                         
-                        if engagement_choice == 1:  # 5% chance - Bullpost reply (very reduced)
-                            if can_perform_action('crypto_bullposts') and can_perform_15min_action('tweets'):
-                                logger.info(f"Posting crypto bullpost on tweet {tw.id} from @{user.username}")
-                                await post_crypto_bullpost(tw, is_mention=False)
+                        # Retweet most of them (80% chance since they already contain contract address)
+                        if randint(1, 10) <= 8:
+                            await safe_retweet(str(tw.id))
                         
-                        elif engagement_choice <= 8:  # 35% chance - Like + potential retweet
-                            await safe_like(str(tw.id))
-                            # UPDATED: Only retweet if tweet contains DEGEN contract address
-                            if randint(1, 5) == 1:  # 20% of likes also get retweeted
-                                await safe_retweet(str(tw.id), require_contract_address=True, tweet_text=tw.text)
-                        
-                        elif engagement_choice <= 12:  # 20% chance - Just like
-                            await safe_like(str(tw.id))
-                        
-                        # 40% chance - no action (just observe)
+                        # Sometimes reply with bullpost (10% chance to avoid spam)
+                        if randint(1, 10) == 1 and can_perform_action('crypto_bullposts') and can_perform_15min_action('tweets'):
+                            logger.info(f"Posting bullpost on contract mention {tw.id}")
+                            await post_crypto_bullpost(tw, is_mention=False)
                         
                         # Consider following active accounts with good engagement
-                        if (user.public_metrics.get('followers_count', 0) < 10000 and 
-                            randint(1, 50) == 1):  # 2% chance to follow (very reduced)
+                        if (user and user.public_metrics.get('followers_count', 0) < 10000 and 
+                            randint(1, 50) == 1):  # 2% chance to follow
                             await safe_follow(str(user.id))
+                        
+                        logger.info(f"Engaged with contract mention: {tw.id}")
                         
                         # Mark as processed
                         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", str(tw.id))
                         
-                        # Small delay between tweet attempts to spread them out
-                        await asyncio.sleep(5)
+                        # Small delay between engagements
+                        await asyncio.sleep(2)
                         
                     except Exception as e:
-                        logger.error(f"Error engaging with tweet {tw.id}: {e}")
+                        logger.error(f"Error engaging with contract mention {tw.id}: {e}")
                         continue
-            
+                
+                redis_client.set(key, str(newest))
+                
         except Exception as e:
-            logger.error(f"crypto_engagement_loop error: {e}", exc_info=True)
+            logger.error(f"contract_engagement_loop error: {e}")
         
-        await asyncio.sleep(900)  # Every 15 minutes (1 call per 15min)
+        await asyncio.sleep(600)  # Every 10 minutes (1.5 calls per 15min)
 
 async def ogdegen_monitor_loop():
     """Monitor and retweet @ogdegenonsol posts"""
@@ -789,7 +730,7 @@ async def ogdegen_monitor_loop():
             if res and res.data:
                 newest = max(int(t.id) for t in res.data)
                 for tw in res.data:
-                    # Always retweet ogdegen posts (no contract address requirement)
+                    # Always retweet ogdegen posts
                     await safe_retweet(str(tw.id))
                     # Also like them
                     await safe_like(str(tw.id))
@@ -800,48 +741,7 @@ async def ogdegen_monitor_loop():
         except Exception as e:
             logger.error(f"ogdegen_monitor_loop error: {e}")
         
-        await asyncio.sleep(300)  # Every 5 minutes (3 calls per 15min)
-
-async def contract_monitor_loop():
-    """Monitor tweets mentioning the contract address"""
-    key = f"{REDIS_PREFIX}last_contract_id"
-    if not redis_client.exists(key):
-        redis_client.set(key, INITIAL_SEARCH_ID)
-    
-    while True:
-        try:
-            last_id = redis_client.get(key)
-            params = {
-                "query": f"{DEGEN_ADDR} -is:retweet",
-                "since_id": last_id,
-                "tweet_fields": ["id", "text", "author_id", "created_at"],
-                "max_results": 10
-            }
-            
-            res = await safe_search(x_client.search_recent_tweets, 'general', **params)
-            
-            if res and res.data:
-                newest = max(int(t.id) for t in res.data)
-                for tw in res.data:
-                    if tw.author_id == BOT_ID:  # Skip our own tweets
-                        continue
-                    
-                    # Like all contract mentions
-                    await safe_like(str(tw.id))
-                    
-                    # Retweet some of them (30% chance, reduced from 40%)
-                    # No need to check contract address here since query already filters for it
-                    if randint(1, 10) <= 3:
-                        await safe_retweet(str(tw.id))
-                    
-                    logger.info(f"Engaged with contract mention: {tw.id}")
-                
-                redis_client.set(key, str(newest))
-                
-        except Exception as e:
-            logger.error(f"contract_monitor_loop error: {e}")
-        
-        await asyncio.sleep(450)  # Every 7.5 minutes (2 calls per 15min)
+        await asyncio.sleep(300)  # Every 5 minutes
 
 async def main_post_loop():
     """Main account posts every 80 minutes (18 times per day) promoting Ask Degen platform features"""
@@ -977,8 +877,6 @@ async def main_post_loop():
                 
                 for attempt in range(max_attempts):
                     # Use a more random selection instead of linear
-                    import hashlib
-                    import time
                     seed = int(time.time()) + post_counter + attempt
                     prompt_index = seed % len(platform_prompts)
                     
@@ -1189,37 +1087,25 @@ async def main():
         redis_client.sadd(f"{REDIS_PREFIX}replied_ids", tweet_id)
         logger.info(f"Pre-marked blocked tweet ID {tweet_id} as replied")
     
-    logger.info("Starting all loops with OFFICIAL X API rate limits...")
-    logger.info("Based on X API Basic tier documentation:")
-    logger.info("- Tweets: 100 per 24 hours TOTAL")
-    logger.info("- Search: 60 per 15min, Mentions: 10 per 15min")
-    logger.info("- Retweets/Follows: 5 per 15min each")
-    logger.info("- Likes: 200 per 24 hours")
-    logger.info("")
-    logger.info("🔧 ENHANCED DAILY LIMIT HANDLING:")
-    logger.info("- Bot will automatically detect daily limit exhaustion")
-    logger.info("- Continue likes/retweets/follows but skip ALL tweets until reset")
-    logger.info("- No more wasted 15-minute sleeps on exhausted limits")
-    logger.info("")
-    logger.info("🎯 RETWEET FILTERING:")
-    logger.info("- Crypto engagement loop: ONLY retweets tweets containing DEGEN contract address")
-    logger.info("- @ogdegenonsol posts: Always retweeted (no filter)")
-    logger.info("- Contract mentions: Always retweeted (already filtered by search)")
+    logger.info("Starting all loops with EFFICIENT CONTRACT ADDRESS SEARCH...")
+    logger.info("🔧 KEY CHANGES:")
+    logger.info("- Contract engagement: Search directly for contract address mentions")
+    logger.info("- No more wasted searches on general crypto terms")
+    logger.info("- Higher retweet rate (80%) since all results contain contract address")
+    logger.info("- @ogdegenonsol posts: Always retweeted")
+    logger.info("- Enhanced main post variation with 40+ different prompt styles")
     logger.info("")
     logger.info("Search intervals:")
     logger.info("- Mentions: every 2.5min (6/15min, under 10 limit)")
-    logger.info("- Crypto engagement: every 15min (1/15min)")
+    logger.info("- Contract engagement: every 10min (1.5/15min)")
     logger.info("- OGdegen monitor: every 5min (3/15min)")
-    logger.info("- Contract monitor: every 7.5min (2/15min)")
-    logger.info("Total: ~12 searches per 15min (under 60 limit)")
-    logger.info("Tweet limit: 4 per 15min (to spread 100 daily tweets)")
+    logger.info("Total: ~10.5 searches per 15min (well under 60 limit)")
     
     await asyncio.gather(
         search_mentions_loop(),
         main_post_loop(),
-        crypto_engagement_loop(),
+        contract_engagement_loop(),
         ogdegen_monitor_loop(),
-        contract_monitor_loop(),
         log_daily_stats()
     )
 

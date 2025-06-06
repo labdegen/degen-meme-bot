@@ -846,130 +846,216 @@ async def contract_monitor_loop():
 async def main_post_loop():
     """Main account posts every 80 minutes (18 times per day) promoting Ask Degen platform features"""
     
-    # Professional tech founder prompts that cryptically promote platform features
+    # Much more varied prompts - mix of professional tech founder and experienced trader perspectives
     platform_prompts = [
-        # Social Analytics & Sentiment Features
-        "Write a first-person tweet as Ask Degen about reading social sentiment in crypto markets. Mention pattern recognition without being obvious. Professional tone, hint at proprietary methods.",
+        # Professional Tech Founder Voice (no "As Ask Degen")
+        "Write a tweet about why most crypto analysis tools fail traders. Professional insight from someone who's built better solutions.",
         
-        "Write a first-person tweet about the difference between real community growth and artificial hype. Sound like a tech founder who's built tools to detect this.",
+        "Write a tweet about the gap between social media hype and actual market data in crypto. Tech founder perspective.",
         
-        "Write a tweet about why most traders lose money on meme coins. Hint at having data/insights that could help. Professional but accessible tone.",
+        "Write a professional tweet about what separates successful meme coin platforms from the noise. Hint at having built something different.",
         
-        # KOL & Influencer Tracking
-        "Write a tweet about following the right crypto voices vs falling for fake influencers. Hint at having systems to track this. Tech founder perspective.",
+        "Write a tweet about the psychology behind pump and dump schemes. Educational tone from someone with data access.",
         
-        "Write a first-person observation about how crypto Twitter really works behind the scenes. Professional insight, hint at platform features.",
+        "Write a tweet about why reading charts isn't enough for meme coins. Professional take on multi-signal analysis.",
         
-        # Chart Analysis & Technical Education  
-        "Write a tweet about reading charts vs reading sentiment for meme coins. Hint at combining both approaches. Professional trading insight.",
+        # Experienced Trader/Degen Voice
+        "Write a tweet from an experienced meme coin trader about red flags most people miss in new launches.",
         
-        "Write a tweet about the patterns you see before meme coins pump. Educational but mysterious. First person from Ask Degen perspective.",
+        "Write a tweet about the difference between diamond hands and smart risk management. Experienced trader perspective.",
         
-        # Scam Detection & Risk Management
-        "Write a tweet about the red flags in new token launches that most people miss. Hint at having systematic ways to spot these.",
+        "Write a tweet about why following the right crypto voices matters more than following the loudest ones.",
         
-        "Write a first-person tweet about pump and dump mechanics. Educational tone, hint at having tools to detect early warning signs.",
+        "Write a tweet about timing meme coin entries and exits. Share wisdom from someone who's seen many cycles.",
         
-        "Write a tweet about liquidity traps in meme coins. Professional insight, suggest there are ways to analyze this properly.",
+        "Write a tweet about liquidity traps that catch new meme coin traders. Educational from experience.",
         
-        # Platform Education & Onboarding
-        "Write a tweet about what new crypto traders should learn first. Hint at having educational resources. Supportive but professional tone.",
+        # Analytical/Data-Driven Voice
+        "Write a tweet about patterns you notice before meme coins pump. Analytical perspective without giving away secrets.",
         
-        "Write a first-person observation about the learning curve in meme coin trading. Mention that proper tools make the difference.",
+        "Write a tweet about the importance of token age analysis in meme coin research. Data-driven insight.",
         
-        # Diamond Hands & Psychology Features
-        "Write a tweet about the psychology of holding vs selling meme coins. Hint at having ways to measure market psychology.",
+        "Write a tweet about social sentiment vs actual trading volume in crypto markets. Analytical observation.",
         
-        "Write a first-person tweet about 'diamond hands' vs smart trading. Professional take on market psychology.",
+        "Write a tweet about why Google Trends data matters for crypto timing. Research-based perspective.",
         
-        # Token Age & Launch Platform Analysis
-        "Write a tweet about why token age matters in meme coin analysis. Hint at having systematic ways to research this.",
+        "Write a tweet about measuring community authenticity vs artificial hype. Data analyst angle.",
         
-        "Write a tweet about the difference between pump.fun launches vs other platforms. Educational insight from experience.",
+        # Educator Voice
+        "Write an educational tweet about what new meme coin traders should learn first. Helpful teacher tone.",
         
-        # Google Trends & Market Intelligence
-        "Write a first-person tweet about using search data to predict crypto trends. Hint at having access to this type of intelligence.",
+        "Write a tweet explaining why most crypto 'alpha' on Twitter is actually noise. Educational debunking.",
         
-        "Write a tweet about the gap between social hype and real market data. Professional insight, hint at bridging this gap.",
+        "Write a tweet about the real cost of FOMO in meme coin trading. Educational with examples.",
         
-        # Real-time Analysis Features
-        "Write a tweet about the speed of information in crypto markets. Hint at having real-time analysis capabilities.",
+        "Write a tweet about risk management basics for volatile crypto markets. Educational finance perspective.",
         
-        "Write a first-person observation about what separates successful meme coin traders from the rest. Hint at data-driven approaches."
+        "Write a tweet about the learning curve in crypto trading and how to shorten it.",
+        
+        # Market Observer Voice  
+        "Write a tweet observing how meme coin narratives spread across crypto Twitter. Sociological angle.",
+        
+        "Write a tweet about the lifecycle of meme coin communities. Anthropological observation.",
+        
+        "Write a tweet about information asymmetry in crypto markets. Economic perspective.",
+        
+        "Write a tweet about how crypto Twitter really influences price action. Media analysis angle.",
+        
+        "Write a tweet about the evolution of meme coin trading over the past year. Historical perspective.",
+        
+        # Problem-Solver Voice
+        "Write a tweet about the biggest unsolved problems in meme coin trading. Solution-oriented thinking.",
+        
+        "Write a tweet about why current crypto tools don't serve retail traders well. Problem identification.",
+        
+        "Write a tweet about what meme coin traders actually need vs what they think they need.",
+        
+        "Write a tweet about bridging the gap between professional trading tools and retail accessibility.",
+        
+        "Write a tweet about making crypto markets more transparent for everyone.",
+        
+        # Contrarian Voice
+        "Write a contrarian take on meme coin 'diamond hands' culture. Thoughtful disagreement.",
+        
+        "Write a tweet challenging common wisdom about crypto influencer alpha. Contrarian but fair.",
+        
+        "Write a tweet about why chasing the latest meme coin meta usually fails. Contrarian education.",
+        
+        "Write a tweet questioning whether more crypto data actually helps most traders. Philosophical angle.",
+        
+        "Write a tweet about why the loudest crypto voices aren't always the smartest. Contrarian observation.",
+        
+        # Storyteller Voice
+        "Tell a brief story about a meme coin trade that taught you an important lesson about market psychology.",
+        
+        "Share an observation about crypto market behavior that most people never notice.",
+        
+        "Describe what separates traders who survive crypto winters from those who don't.",
+        
+        "Share insight about how crypto communities really form and grow organically.",
+        
+        "Tell about a pattern in meme coin launches that took you years to recognize."
     ]
     
-    # Enhanced theme categories that map to platform features
-    theme_categories = [
-        "social_sentiment_analysis", "kol_tracking", "chart_pattern_recognition", 
-        "scam_detection", "pump_dump_mechanics", "liquidity_analysis",
-        "token_age_research", "launch_platform_analysis", "market_psychology",
-        "diamond_hands_scoring", "real_time_intelligence", "trader_education",
-        "community_authenticity", "hype_detection", "risk_management",
-        "entry_exit_timing", "google_trends_analysis", "platform_comparison"
+    # Prompt style variations to add even more diversity
+    style_variations = [
+        "Keep it under 200 characters. Professional but accessible.",
+        "Write conversationally. Share wisdom without lecturing.", 
+        "Be direct and actionable. Give practical insight.",
+        "Write thoughtfully. This should make people think.",
+        "Be educational but not preachy. Share knowledge naturally.",
+        "Write with quiet confidence. No need to oversell the point.",
+        "Keep it real. Share honest market observations.",
+        "Write like you're talking to a friend who trades crypto.",
+        "Be analytical but human. Data with personality.",
+        "Write with earned authority. You've seen this before."
     ]
     
     post_counter = 0
-    logger.info("Starting main_post_loop with Ask Degen platform promotion (18 posts/day)...")
+    last_style_used = 0
+    logger.info("Starting main_post_loop with varied Ask Degen platform promotion (18 posts/day)...")
 
     while True:
         try:
             if can_perform_action('main_posts') and can_post_tweet():
                 logger.info(f"Ask Degen platform post attempt #{post_counter + 1}")
                 
-                # Enhanced REDIS tracking for content freshness
+                # Enhanced REDIS tracking with better content deduplication
                 today_key = f"{REDIS_PREFIX}themes_used:{time.strftime('%Y-%m-%d')}"
-                content_history_key = f"{REDIS_PREFIX}content_history:{time.strftime('%Y-%m-%d')}"
-                recent_concepts_key = f"{REDIS_PREFIX}recent_concepts"
-                
-                # Get current theme and check usage
-                current_theme = theme_categories[post_counter % len(theme_categories)]
-                theme_used_count = redis_client.hget(today_key, current_theme)
-                theme_used_count = int(theme_used_count) if theme_used_count else 0
-                
-                # Find least used theme if current one is overused
-                attempts = 0
-                while theme_used_count >= 2 and attempts < len(theme_categories):
-                    post_counter += 1
-                    attempts += 1
-                    current_theme = theme_categories[post_counter % len(theme_categories)]
-                    theme_used_count = redis_client.hget(today_key, current_theme)
-                    theme_used_count = int(theme_used_count) if theme_used_count else 0
-                
-                # Select prompt and enhance with theme + history context
-                prompt_index = post_counter % len(platform_prompts)
-                base_prompt = platform_prompts[prompt_index]
+                content_history_key = f"{REDIS_PREFIX}content_snippets:{time.strftime('%Y-%m-%d')}"
+                phrase_history_key = f"{REDIS_PREFIX}phrase_history"
                 
                 # Get recent content to avoid repetition
-                recent_posts = redis_client.lrange(f"{REDIS_PREFIX}recent_main_posts", 0, 9)
-                recent_concepts = redis_client.lrange(recent_concepts_key, 0, 19)
+                recent_posts = redis_client.lrange(f"{REDIS_PREFIX}recent_main_posts", 0, 14)  # More history
+                recent_phrases = redis_client.lrange(phrase_history_key, 0, 49)  # Track phrases
+                recent_snippets = redis_client.lrange(content_history_key, 0, 29)
                 
-                # Enhanced prompt with context and constraints
-                enhanced_prompt = f"""{base_prompt}
+                # Select prompt with better variation
+                max_attempts = 10
+                best_prompt = None
+                best_style = None
                 
-Theme focus: {current_theme.replace('_', ' ')}
+                for attempt in range(max_attempts):
+                    # Use a more random selection instead of linear
+                    import hashlib
+                    import time
+                    seed = int(time.time()) + post_counter + attempt
+                    prompt_index = seed % len(platform_prompts)
+                    
+                    # Vary style selection
+                    style_index = (last_style_used + 1 + attempt) % len(style_variations)
+                    
+                    test_prompt = platform_prompts[prompt_index]
+                    test_style = style_variations[style_index]
+                    
+                    # Check if this prompt combo was used recently
+                    prompt_signature = f"{prompt_index}_{style_index}"
+                    recent_signatures = redis_client.lrange(f"{REDIS_PREFIX}prompt_signatures", 0, 9)
+                    
+                    if prompt_signature.encode() not in recent_signatures:
+                        best_prompt = test_prompt
+                        best_style = test_style
+                        last_style_used = style_index
+                        
+                        # Track this signature
+                        redis_client.lpush(f"{REDIS_PREFIX}prompt_signatures", prompt_signature)
+                        redis_client.ltrim(f"{REDIS_PREFIX}prompt_signatures", 0, 19)
+                        redis_client.expire(f"{REDIS_PREFIX}prompt_signatures", 86400)
+                        break
+                
+                if not best_prompt:
+                    # Fallback if all recent prompts were used
+                    best_prompt = platform_prompts[post_counter % len(platform_prompts)]
+                    best_style = style_variations[post_counter % len(style_variations)]
+                
+                # Build context-aware prompt
+                avoid_phrases = []
+                for recent in recent_phrases[-20:]:  # Last 20 phrases
+                    if isinstance(recent, bytes):
+                        recent = recent.decode('utf-8')
+                    avoid_phrases.append(recent)
+                
+                enhanced_prompt = f"""{best_prompt}
 
-CONSTRAINTS:
-- Keep under 240 characters for room to add $DEGEN
-- Professional tech founder tone, not philosophical 
-- First person as Ask Degen platform
-- Cryptically reference platform capabilities
-- Educational value for new meme coin traders
-- No direct sales pitch
+{best_style}
 
-AVOID repeating these recent concepts: {', '.join(recent_concepts[-10:]) if recent_concepts else 'None'}
+IMPORTANT CONSTRAINTS:
+- Never start with "As Ask Degen" or "Ask Degen here"
+- Write naturally in the specified voice/perspective 
+- Under 240 chars to leave room for $DEGEN tag
+- No crypto slang (no "WAGMI", "LFG", "fren", etc.)
+- Educational value for meme coin traders
+- Subtly reference having built tools/platforms without being salesy
 
-CONTEXT: You've built a platform that analyzes social sentiment, tracks KOLs, detects scams, analyzes token launches, and helps traders learn. Reference these capabilities subtly."""
+AVOID these overused phrases: {', '.join(avoid_phrases[-10:]) if avoid_phrases else 'None'}
+
+Context: You've built a platform that analyzes social sentiment, tracks KOLs, detects scams, analyzes token launches, helps traders learn. Reference capabilities naturally."""
                 
                 # Get content from Grok
                 raw_content = ask_grok(enhanced_prompt).strip()
                 
-                # Clean and validate content
+                # Clean up common repetitive starts
+                cleanup_patterns = [
+                    r'^As Ask Degen,?\s*',
+                    r'^Ask Degen here[.,:]?\s*',
+                    r'^At Ask Degen,?\s*',
+                    r'^From Ask Degen[.,:]?\s*'
+                ]
+                
+                for pattern in cleanup_patterns:
+                    raw_content = re.sub(pattern, '', raw_content, flags=re.IGNORECASE)
+                raw_content = raw_content.strip()
+                
+                # Validate content quality
                 if not raw_content or len(raw_content) < 20:
                     logger.warning("Grok returned insufficient content, skipping post")
                     continue
                 
-                # Extract key concepts for tracking
-                key_concepts = extract_key_concepts(raw_content)
+                # Extract opening phrases to track repetition
+                opening_phrase = ' '.join(raw_content.split()[:4])  # First 4 words
+                redis_client.lpush(phrase_history_key, opening_phrase)
+                redis_client.ltrim(phrase_history_key, 0, 99)  # Keep last 100
+                redis_client.expire(phrase_history_key, 172800)  # 2 days
                 
                 # Build final tweet
                 tweet = f"{raw_content}\n\n$DEGEN"
@@ -978,9 +1064,9 @@ CONTEXT: You've built a platform that analyzes social sentiment, tracks KOLs, de
                 if len(tweet) > 270:
                     tweet = truncate_to_sentence(raw_content, 240) + "\n\n$DEGEN"
                 
-                # Check against recent posts for similarity
-                if is_content_too_similar(tweet, recent_posts):
-                    logger.info("Content too similar to recent posts, trying different theme")
+                # Enhanced similarity check
+                if is_content_too_similar_enhanced(tweet, recent_posts, recent_snippets):
+                    logger.info("Content too similar to recent posts, trying different approach")
                     post_counter += 1
                     continue
                 
@@ -988,27 +1074,18 @@ CONTEXT: You've built a platform that analyzes social sentiment, tracks KOLs, de
                 result = await safe_tweet(tweet, action_type='main_posts')
                 
                 if result:  # Success - update all tracking
-                    # Track recent posts (keep last 10)
+                    # Track recent posts (keep last 15)
                     redis_client.lpush(f"{REDIS_PREFIX}recent_main_posts", tweet)
-                    redis_client.ltrim(f"{REDIS_PREFIX}recent_main_posts", 0, 9)
+                    redis_client.ltrim(f"{REDIS_PREFIX}recent_main_posts", 0, 14)
                     redis_client.expire(f"{REDIS_PREFIX}recent_main_posts", 86400)
                     
-                    # Track theme usage for today
-                    redis_client.hincrby(today_key, current_theme, 1)
-                    redis_client.expire(today_key, 86400)
+                    # Track content snippets for better deduplication
+                    content_snippet = ' '.join(raw_content.split()[:8])  # First 8 words
+                    redis_client.lpush(content_history_key, content_snippet)
+                    redis_client.ltrim(content_history_key, 0, 49)
+                    redis_client.expire(content_history_key, 86400)
                     
-                    # Track content concepts to avoid repetition
-                    for concept in key_concepts:
-                        redis_client.lpush(recent_concepts_key, concept)
-                    redis_client.ltrim(recent_concepts_key, 0, 49)  # Keep last 50 concepts
-                    redis_client.expire(recent_concepts_key, 172800)  # 2 days
-                    
-                    # Track successful content patterns
-                    content_pattern_key = f"{REDIS_PREFIX}successful_patterns"
-                    redis_client.hset(content_pattern_key, f"{current_theme}:{prompt_index}", raw_content[:100])
-                    redis_client.expire(content_pattern_key, 604800)  # 1 week
-                    
-                    logger.info(f"Ask Degen platform post published! Theme: {current_theme}, Concepts: {key_concepts}")
+                    logger.info(f"Ask Degen platform post published! Style: {best_style[:30]}...")
                     
                 else:
                     logger.warning("Tweet failed to post")
@@ -1029,52 +1106,42 @@ CONTEXT: You've built a platform that analyzes social sentiment, tracks KOLs, de
             
         await asyncio.sleep(4800)  # 80 minutes
 
-# Add these helper functions outside of any class (at module level)
-def extract_key_concepts(content: str) -> list:
-    """Extract key concepts from tweet content to track and avoid repetition"""
-    import re
-    
-    # Remove common words and extract meaningful terms
-    stop_words = {'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by', 'is', 'are', 'was', 'were', 'be', 'been', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should', 'may', 'might', 'can', 'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'its', 'our', 'their'}
-    
-    # Extract words, convert to lowercase, filter out stop words and short words
-    words = re.findall(r'\b[a-zA-Z]{4,}\b', content.lower())
-    concepts = [word for word in words if word not in stop_words and len(word) >= 4]
-    
-    # Also extract key crypto terms and phrases
-    crypto_patterns = [
-        'social sentiment', 'chart analysis', 'pump dump', 'diamond hands', 
-        'market psychology', 'liquidity trap', 'token launch', 'community growth',
-        'influencer tracking', 'scam detection', 'entry exit', 'risk management'
-    ]
-    
-    for pattern in crypto_patterns:
-        if pattern.replace(' ', '') in content.lower().replace(' ', ''):
-            concepts.append(pattern.replace(' ', '_'))
-    
-    return concepts[:5]  # Return top 5 concepts
-
-def is_content_too_similar(new_content: str, recent_posts: list) -> bool:
-    """Check if new content is too similar to recent posts"""
-    if not recent_posts:
+# Enhanced similarity detection function
+def is_content_too_similar_enhanced(new_content: str, recent_posts: list, recent_snippets: list) -> bool:
+    """Enhanced similarity check with multiple detection methods"""
+    if not recent_posts and not recent_snippets:
         return False
     
     new_words = set(new_content.lower().split())
+    new_content_lower = new_content.lower()
     
-    for recent_post in recent_posts[:5]:  # Check last 5 posts
+    # Check against recent full posts
+    for recent_post in recent_posts[:8]:  # Check last 8 posts
         if isinstance(recent_post, bytes):
             recent_post = recent_post.decode('utf-8')
         
         recent_words = set(recent_post.lower().split())
         
-        # Calculate word overlap
+        # Word overlap check
         common_words = new_words.intersection(recent_words)
         total_unique_words = len(new_words.union(recent_words))
         
         if total_unique_words > 0:
             similarity_ratio = len(common_words) / total_unique_words
-            if similarity_ratio > 0.4:  # More than 40% word overlap
+            if similarity_ratio > 0.35:  # Reduced threshold
                 return True
+        
+        # Phrase similarity check
+        if any(phrase in new_content_lower for phrase in recent_post.lower().split('.') if len(phrase) > 15):
+            return True
+    
+    # Check against content snippets
+    for snippet in recent_snippets[:20]:
+        if isinstance(snippet, bytes):
+            snippet = snippet.decode('utf-8')
+        
+        if snippet.lower() in new_content_lower:
+            return True
     
     return False
 
